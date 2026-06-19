@@ -412,7 +412,7 @@ export class AviaClient {
   // Core AVIA action: choose dept + subject, WAIT for the auto-filled text,
   // verify it contains `expectedContains`, then Send (unless dryRun). Never
   // overwrites the auto-filled text. Returns { verified, sent, filled }.
-  async verifyAndSendAvia({ department, subject, subjectRe, expectedContains, audience, dryRun }) {
+  async verifyAndSendAvia({ bundleId, department, subject, subjectRe, expectedContains, audience, dryRun }) {
     const dept = await this.firstExisting(sel.chat.departmentSelect, { timeout: 6000 });
     const area = await this.firstExisting(sel.chat.textArea, { timeout: 3000 });
     if (!dept || !area) {
@@ -451,110 +451,55 @@ export class AviaClient {
 
     if (dryRun) return { verified: true, sent: false, filled };
 
-    // Do NOT type into the textarea — the subject's auto-fill already set the
-    // composer's (controlled) React state. Clearing/refilling de-syncs it so
-    // Send no-ops (box shows text + button looks enabled, but send reads empty).
-    // This matches the manual sends that worked.
-    if (audience === 'administrators') {
-      const admins = await this.firstExisting(sel.chat.toAdministratorsButton, { timeout: 1500 });
-      if (admins) await admins.click().catch(() => {});
+    // The UI Send button does NOT fire under browser automation (every click
+    // method posts nothing), so transmit the exact request the working UI makes:
+    //   POST /book/bundle_notifies/create  (multipart/form-data)
+    // Fields captured from a real send: bundle_id, message, for_admin,
+    // type=<subject option id>, departament_id=<dept option id>, provider_id=0,
+    // remote_order=undefined, reply_to_id=undefined.
+    const deptId = (await dept.evaluate((el) => el.value).catch(() => '')) || '';
+    const typeId = (await subj.evaluate((el) => el.value).catch(() => '')) || '';
+    if (!deptId || !typeId) {
+      await this.screenshot('avia-missing-ids');
+      log.warn(`[avia] ${bundleId}: missing dept/subject id (dept=${deptId} type=${typeId}); not sending.`);
+      return { verified: true, sent: false, filled };
     }
-
-    const send = await this.firstExisting(sel.chat.sendButton, { timeout: 5000 });
-    if (!send) {
-      await this.screenshot('avia-send-not-found');
-      throw new Error('Send button not found — verify sel.chat.sendButton.');
-    }
-    await send.scrollIntoViewIfNeeded().catch(() => {});
-
-    const dbg = await this.page
-      .evaluate(() => {
-        const p = document.querySelector('div.fixed.top-0.right-0') || document;
-        const b = Array.from(p.querySelectorAll('button')).find((x) => x.textContent.trim() === 'Send');
-        const ta = p.querySelector('textarea');
-        return {
-          hasFocus: document.hasFocus(),
-          sendEnabled: b ? !/cursor-not-allowed/.test(b.className) : null,
-          taLen: ta ? (ta.value || '').length : -1,
-        };
-      })
-      .catch(() => null);
-    log.info('[avia] pre-send: ' + JSON.stringify(dbg));
-
-    // Reset transport capture (from addInitScript) right before sending.
-    await this.page.evaluate(() => { try { window.__sendlog = []; } catch (_) {} }).catch(() => {});
-
-    // Try several triggers, stopping when the composer clears. js-click first —
-    // it matched the successful manual sends; then a full pointer/mouse event
-    // sequence (for handlers bound to mousedown/pointerdown), then Playwright
-    // click, then keyboard.
-    const cleared = async () => ((await area.inputValue().catch(() => '')) || '').trim().length === 0;
-    const attempts = [
-      ['react-onclick', async () => {
-        await send
-          .evaluate((el) => {
-            // Walk up a few nodes to find the React props with an onClick (the
-            // <button> or a wrapping element). Invoke it directly — bypasses DOM
-            // event dispatch, which the automated browser fails to deliver here.
-            let node = el;
-            for (let i = 0; i < 4 && node; i++) {
-              const k = Object.keys(node).find(
-                (x) => x.startsWith('__reactProps$') || x.startsWith('__reactEventHandlers$')
-              );
-              const p = k ? node[k] : null;
-              if (p && typeof p.onClick === 'function') {
-                p.onClick({
-                  preventDefault() {},
-                  stopPropagation() {},
-                  currentTarget: node,
-                  target: el,
-                  type: 'click',
-                  bubbles: true,
-                  nativeEvent: {},
-                });
-                return;
-              }
-              node = node.parentElement;
-            }
-          })
-          .catch(() => {});
-      }],
-      ['js-click', async () => { await send.evaluate((el) => el.click()).catch(() => {}); }],
-      ['dispatch', async () => {
-        await send
-          .evaluate((el) => {
-            const r = el.getBoundingClientRect();
-            const o = { bubbles: true, cancelable: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
-            el.dispatchEvent(new PointerEvent('pointerdown', o));
-            el.dispatchEvent(new MouseEvent('mousedown', o));
-            el.dispatchEvent(new PointerEvent('pointerup', o));
-            el.dispatchEvent(new MouseEvent('mouseup', o));
-            el.dispatchEvent(new MouseEvent('click', o));
-          })
-          .catch(() => {});
-      }],
-      ['pw-click', async () => { await send.click({ timeout: 5000 }).catch(() => {}); }],
-      ['ctrl-enter', async () => { await area.click().catch(() => {}); await this.page.keyboard.press('Control+Enter').catch(() => {}); }],
-    ];
-    let sent = false;
-    let usedMethod = null;
-    for (const [name, fn] of attempts) {
-      await fn();
-      await this.page.waitForTimeout(2000);
-      if (await cleared()) {
-        sent = true;
-        usedMethod = name;
-        break;
-      }
-    }
-    const sendlog = await this.page.evaluate(() => (window.__sendlog || []).slice(-12)).catch(() => []);
+    const res = await this.page
+      .evaluate(
+        async ({ bundleId, message, forAdmin, deptId, typeId }) => {
+          try {
+            const fd = new FormData();
+            fd.append('bundle_id', String(bundleId));
+            fd.append('message', message);
+            fd.append('for_admin', forAdmin ? 'true' : 'false');
+            fd.append('type', String(typeId));
+            fd.append('departament_id', String(deptId));
+            fd.append('provider_id', '0');
+            fd.append('remote_order', 'undefined');
+            fd.append('reply_to_id', 'undefined');
+            const tok = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+            const r = await fetch('/book/bundle_notifies/create', {
+              method: 'POST',
+              body: fd,
+              credentials: 'include',
+              headers: tok ? { 'X-CSRF-Token': tok } : {},
+            });
+            let txt = '';
+            try { txt = (await r.text()).slice(0, 100); } catch (_) {}
+            return { ok: r.ok, status: r.status, txt };
+          } catch (e) {
+            return { ok: false, status: 0, error: String(e) };
+          }
+        },
+        { bundleId, message: filled, forAdmin: audience === 'administrators', deptId, typeId }
+      )
+      .catch((e) => ({ ok: false, status: 0, error: String(e) }));
+    const sent = Boolean(res && res.ok && res.status >= 200 && res.status < 300);
     log.info(
-      `[avia] send ${sent ? 'OK via ' + usedMethod : 'FAILED (all methods)'} | transport=${JSON.stringify(sendlog)}`
+      `[avia] POST create -> status=${res && res.status} ok=${res && res.ok}` +
+        `${res && res.error ? ' err=' + res.error : ''} (bundle=${bundleId} dept=${deptId} type=${typeId})`
     );
-    if (!sent) {
-      await this.screenshot('avia-send-not-confirmed');
-      log.warn('Send did not clear the composer — NOT sent. dbg=' + JSON.stringify(dbg) + ' transport=' + JSON.stringify(sendlog));
-    }
+    if (!sent) await this.screenshot('avia-direct-send-failed');
     return { verified: true, sent, filled };
   }
 }

@@ -129,6 +129,7 @@ export async function runCycle() {
         }
 
         const sendArgs = {
+          bundleId: c.id,
           department: config.message.department,
           subject: config.message.subject,
           subjectRe: config.message.subjectRe,
