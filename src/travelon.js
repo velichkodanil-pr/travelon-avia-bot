@@ -410,14 +410,8 @@ export class AviaClient {
 
     if (dryRun) return { verified: true, sent: false, filled };
 
-    // Commit the auto-filled text so the page registers it as user input —
-    // otherwise Send stays disabled and nothing is posted. Re-fill with the
-    // SAME verified text to keep the exact wording.
-    await area.click().catch(() => {});
-    await area.fill('').catch(() => {});
-    await area.fill(filled).catch(() => {});
-    await this.page.waitForTimeout(400);
-
+    // The subject's auto-fill already enables Send; we do NOT touch the textarea
+    // (clearing/refilling can de-sync the form). Just send and confirm.
     if (audience === 'administrators') {
       const admins = await this.firstExisting(sel.chat.toAdministratorsButton, { timeout: 1500 });
       if (admins) await admins.click().catch(() => {});
