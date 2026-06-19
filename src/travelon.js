@@ -490,6 +490,35 @@ export class AviaClient {
     // click, then keyboard.
     const cleared = async () => ((await area.inputValue().catch(() => '')) || '').trim().length === 0;
     const attempts = [
+      ['react-onclick', async () => {
+        await send
+          .evaluate((el) => {
+            // Walk up a few nodes to find the React props with an onClick (the
+            // <button> or a wrapping element). Invoke it directly — bypasses DOM
+            // event dispatch, which the automated browser fails to deliver here.
+            let node = el;
+            for (let i = 0; i < 4 && node; i++) {
+              const k = Object.keys(node).find(
+                (x) => x.startsWith('__reactProps$') || x.startsWith('__reactEventHandlers$')
+              );
+              const p = k ? node[k] : null;
+              if (p && typeof p.onClick === 'function') {
+                p.onClick({
+                  preventDefault() {},
+                  stopPropagation() {},
+                  currentTarget: node,
+                  target: el,
+                  type: 'click',
+                  bubbles: true,
+                  nativeEvent: {},
+                });
+                return;
+              }
+              node = node.parentElement;
+            }
+          })
+          .catch(() => {});
+      }],
       ['js-click', async () => { await send.evaluate((el) => el.click()).catch(() => {}); }],
       ['dispatch', async () => {
         await send
