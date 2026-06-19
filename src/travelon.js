@@ -423,8 +423,12 @@ export class AviaClient {
       throw new Error('Send button not found — verify sel.chat.sendButton.');
     }
     await send.scrollIntoViewIfNeeded().catch(() => {});
-    await send.click({ timeout: 6000 }).catch(async () => {
-      await send.click({ timeout: 3000, force: true });
+    // Trigger via an IN-PAGE JS click: the composer's React onClick fires
+    // reliably this way. Playwright's coordinate click is a silent no-op on this
+    // fixed-position composer in headless (confirmed by manual testing — an
+    // in-page el.click() posts and clears the composer). Fall back to forced click.
+    await send.evaluate((el) => el.click()).catch(async () => {
+      await send.click({ timeout: 3000, force: true }).catch(() => {});
     });
     await this.page.waitForTimeout(2500);
     // Confirm the send actually happened: the composer clears its textarea on
