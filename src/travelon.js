@@ -67,6 +67,47 @@ export class AviaClient {
     });
     this.context.setDefaultTimeout(config.navTimeout);
     this.page = await this.context.newPage();
+
+    // Capture how the chat actually transmits (WS frame / fetch / XHR) so send
+    // diagnostics are conclusive. Runs in every page before its own scripts.
+    await this.context
+      .addInitScript(() => {
+        try {
+          window.__sendlog = [];
+          const push = (e) => {
+            try { window.__sendlog.push(e); } catch (_) {}
+          };
+          const ws = WebSocket.prototype.send;
+          WebSocket.prototype.send = function (d) {
+            push('WS ' + String(d).slice(0, 140));
+            return ws.apply(this, arguments);
+          };
+          const of = window.fetch;
+          window.fetch = function (...a) {
+            try {
+              const o = a[1] || {};
+              if ((o.method || 'GET').toUpperCase() !== 'GET')
+                push('FETCH ' + (o.method || '') + ' ' + String((a[0] && a[0].url) || a[0]).slice(-40));
+            } catch (_) {}
+            return of.apply(this, a);
+          };
+          const xo = XMLHttpRequest.prototype.open;
+          const xs = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function (m, u) {
+            this.__m = m;
+            this.__u = u;
+            return xo.apply(this, arguments);
+          };
+          XMLHttpRequest.prototype.send = function (b) {
+            try {
+              if ((this.__m || 'GET').toUpperCase() !== 'GET')
+                push('XHR ' + this.__m + ' ' + String(this.__u).slice(-40));
+            } catch (_) {}
+            return xs.apply(this, arguments);
+          };
+        } catch (_) {}
+      })
+      .catch(() => {});
   }
 
   async close() {
@@ -410,15 +451,10 @@ export class AviaClient {
 
     if (dryRun) return { verified: true, sent: false, filled };
 
-    // Commit the message by TYPING the verified auto-fill text into the composer.
-    // The proven transfer bot does exactly this; in HEADLESS the auto-fill alone
-    // is apparently not registered as user input, so Send no-ops without it. We
-    // re-type the SAME text, preserving the exact wording.
-    await area.click().catch(() => {});
-    await area.fill('').catch(() => {});
-    await area.fill(filled).catch(() => {});
-    await this.page.waitForTimeout(400);
-
+    // Do NOT type into the textarea — the subject's auto-fill already set the
+    // composer's (controlled) React state. Clearing/refilling de-syncs it so
+    // Send no-ops (box shows text + button looks enabled, but send reads empty).
+    // This matches the manual sends that worked.
     if (audience === 'administrators') {
       const admins = await this.firstExisting(sel.chat.toAdministratorsButton, { timeout: 1500 });
       if (admins) await admins.click().catch(() => {});
@@ -431,51 +467,45 @@ export class AviaClient {
     }
     await send.scrollIntoViewIfNeeded().catch(() => {});
 
-    // Diagnostic: capture composer/send state right before sending.
     const dbg = await this.page
       .evaluate(() => {
         const p = document.querySelector('div.fixed.top-0.right-0') || document;
-        const btns = Array.from(p.querySelectorAll('button')).filter((x) => x.textContent.trim() === 'Send');
-        const b = btns[0];
+        const b = Array.from(p.querySelectorAll('button')).find((x) => x.textContent.trim() === 'Send');
         const ta = p.querySelector('textarea');
         return {
           hasFocus: document.hasFocus(),
           sendEnabled: b ? !/cursor-not-allowed/.test(b.className) : null,
           taLen: ta ? (ta.value || '').length : -1,
-          sendBtnCount: btns.length,
         };
       })
       .catch(() => null);
     log.info('[avia] pre-send: ' + JSON.stringify(dbg));
 
-    // Try several send triggers, capturing network POSTs + page errors so we can
-    // see exactly what the click fires. Stop as soon as the composer clears.
-    const netLog = [];
-    const errLog = [];
-    const onResp = (r) => {
-      try {
-        if (r.request().method() !== 'GET')
-          netLog.push(r.status() + ' ' + r.request().method() + ' ' + r.url().split('?')[0].slice(-48));
-      } catch {
-        /* ignore */
-      }
-    };
-    const onErr = (e) => {
-      try {
-        errLog.push(String((e && e.message) || e).slice(0, 160));
-      } catch {
-        /* ignore */
-      }
-    };
-    this.page.on('response', onResp);
-    this.page.on('pageerror', onErr);
+    // Reset transport capture (from addInitScript) right before sending.
+    await this.page.evaluate(() => { try { window.__sendlog = []; } catch (_) {} }).catch(() => {});
 
+    // Try several triggers, stopping when the composer clears. js-click first —
+    // it matched the successful manual sends; then a full pointer/mouse event
+    // sequence (for handlers bound to mousedown/pointerdown), then Playwright
+    // click, then keyboard.
     const cleared = async () => ((await area.inputValue().catch(() => '')) || '').trim().length === 0;
     const attempts = [
-      ['pw-click', async () => { await send.click({ timeout: 5000 }).catch(() => {}); }],
       ['js-click', async () => { await send.evaluate((el) => el.click()).catch(() => {}); }],
+      ['dispatch', async () => {
+        await send
+          .evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            const o = { bubbles: true, cancelable: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
+            el.dispatchEvent(new PointerEvent('pointerdown', o));
+            el.dispatchEvent(new MouseEvent('mousedown', o));
+            el.dispatchEvent(new PointerEvent('pointerup', o));
+            el.dispatchEvent(new MouseEvent('mouseup', o));
+            el.dispatchEvent(new MouseEvent('click', o));
+          })
+          .catch(() => {});
+      }],
+      ['pw-click', async () => { await send.click({ timeout: 5000 }).catch(() => {}); }],
       ['ctrl-enter', async () => { await area.click().catch(() => {}); await this.page.keyboard.press('Control+Enter').catch(() => {}); }],
-      ['meta-enter', async () => { await area.click().catch(() => {}); await this.page.keyboard.press('Meta+Enter').catch(() => {}); }],
     ];
     let sent = false;
     let usedMethod = null;
@@ -488,16 +518,13 @@ export class AviaClient {
         break;
       }
     }
-    this.page.off('response', onResp);
-    this.page.off('pageerror', onErr);
+    const sendlog = await this.page.evaluate(() => (window.__sendlog || []).slice(-12)).catch(() => []);
     log.info(
-      `[avia] send ${sent ? 'OK via ' + usedMethod : 'FAILED (all methods)'} | net=${JSON.stringify(
-        netLog.slice(-10)
-      )} | err=${JSON.stringify(errLog.slice(-3))}`
+      `[avia] send ${sent ? 'OK via ' + usedMethod : 'FAILED (all methods)'} | transport=${JSON.stringify(sendlog)}`
     );
     if (!sent) {
       await this.screenshot('avia-send-not-confirmed');
-      log.warn('Send did not clear the composer — message may NOT have been sent. dbg=' + JSON.stringify(dbg));
+      log.warn('Send did not clear the composer — NOT sent. dbg=' + JSON.stringify(dbg) + ' transport=' + JSON.stringify(sendlog));
     }
     return { verified: true, sent, filled };
   }
