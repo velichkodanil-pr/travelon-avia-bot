@@ -1,0 +1,23 @@
+{
+  "name": "travelon-avia-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "24/7 bot that auto-sends the 'regular-flight booking' chat message on new TravelON AVIA bookings (suppliers DRCT, Tickets.ua, Fly One Avia, Skyup).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "RUN_ONCE=true node src/index.js",
+    "codegen": "playwright codegen https://travelon.to",
+    "check": "for f in src/*.js; do node --check \"$f\" || exit 1; done",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3",
+    "playwright": "1.47.2"
+  }
+}
