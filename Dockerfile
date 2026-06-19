@@ -21,5 +21,14 @@ COPY . .
 RUN mkdir -p /app/data
 ENV DATA_DIR=/app/data
 
+# Run the browser HEADED inside a virtual display (Xvfb). The TravelON chat
+# composer only actually transmits the message with real (headed) rendering;
+# pure headless clicked Send but posted nothing (confirmed: the identical click
+# works headed, no-ops headless). Xvfb ships with the Playwright image; install
+# defensively in case it's missing.
+RUN which xvfb-run >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends xvfb && rm -rf /var/lib/apt/lists/*)
+ENV HEADLESS=false
+
 # Long-running worker: node-cron keeps it alive and fires every 5 min.
-CMD ["node", "src/index.js"]
+# xvfb-run gives Chromium a real (virtual) display so headed mode works.
+CMD ["xvfb-run", "-a", "--server-args=-screen 0 1920x1080x24", "node", "src/index.js"]

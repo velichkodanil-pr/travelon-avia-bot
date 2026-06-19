@@ -448,17 +448,53 @@ export class AviaClient {
       .catch(() => null);
     log.info('[avia] pre-send: ' + JSON.stringify(dbg));
 
-    // Click Send the way the proven transfer bot does (Playwright click), with an
-    // in-page el.click() fallback.
-    await send.click({ timeout: 6000 }).catch(async () => {
-      await send.evaluate((el) => el.click()).catch(() => {});
-    });
-    await this.page.waitForTimeout(2500);
+    // Try several send triggers, capturing network POSTs + page errors so we can
+    // see exactly what the click fires. Stop as soon as the composer clears.
+    const netLog = [];
+    const errLog = [];
+    const onResp = (r) => {
+      try {
+        if (r.request().method() !== 'GET')
+          netLog.push(r.status() + ' ' + r.request().method() + ' ' + r.url().split('?')[0].slice(-48));
+      } catch {
+        /* ignore */
+      }
+    };
+    const onErr = (e) => {
+      try {
+        errLog.push(String((e && e.message) || e).slice(0, 160));
+      } catch {
+        /* ignore */
+      }
+    };
+    this.page.on('response', onResp);
+    this.page.on('pageerror', onErr);
 
-    // Confirm the send actually happened: the composer clears its textarea on
-    // success. If it did NOT clear, treat as not sent so we retry (no false "Sent").
-    const remaining = (await area.inputValue().catch(() => '')) || '';
-    const sent = remaining.trim().length === 0;
+    const cleared = async () => ((await area.inputValue().catch(() => '')) || '').trim().length === 0;
+    const attempts = [
+      ['pw-click', async () => { await send.click({ timeout: 5000 }).catch(() => {}); }],
+      ['js-click', async () => { await send.evaluate((el) => el.click()).catch(() => {}); }],
+      ['ctrl-enter', async () => { await area.click().catch(() => {}); await this.page.keyboard.press('Control+Enter').catch(() => {}); }],
+      ['meta-enter', async () => { await area.click().catch(() => {}); await this.page.keyboard.press('Meta+Enter').catch(() => {}); }],
+    ];
+    let sent = false;
+    let usedMethod = null;
+    for (const [name, fn] of attempts) {
+      await fn();
+      await this.page.waitForTimeout(2000);
+      if (await cleared()) {
+        sent = true;
+        usedMethod = name;
+        break;
+      }
+    }
+    this.page.off('response', onResp);
+    this.page.off('pageerror', onErr);
+    log.info(
+      `[avia] send ${sent ? 'OK via ' + usedMethod : 'FAILED (all methods)'} | net=${JSON.stringify(
+        netLog.slice(-10)
+      )} | err=${JSON.stringify(errLog.slice(-3))}`
+    );
     if (!sent) {
       await this.screenshot('avia-send-not-confirmed');
       log.warn('Send did not clear the composer — message may NOT have been sent. dbg=' + JSON.stringify(dbg));
