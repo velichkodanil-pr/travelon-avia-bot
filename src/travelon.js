@@ -410,6 +410,14 @@ export class AviaClient {
 
     if (dryRun) return { verified: true, sent: false, filled };
 
+    // Commit the auto-filled text so the page registers it as user input —
+    // otherwise Send stays disabled and nothing is posted. Re-fill with the
+    // SAME verified text to keep the exact wording.
+    await area.click().catch(() => {});
+    await area.fill('').catch(() => {});
+    await area.fill(filled).catch(() => {});
+    await this.page.waitForTimeout(400);
+
     if (audience === 'administrators') {
       const admins = await this.firstExisting(sel.chat.toAdministratorsButton, { timeout: 1500 });
       if (admins) await admins.click().catch(() => {});
@@ -424,7 +432,16 @@ export class AviaClient {
     await send.click({ timeout: 6000 }).catch(async () => {
       await send.click({ timeout: 3000, force: true });
     });
-    await this.page.waitForTimeout(1500);
-    return { verified: true, sent: true, filled };
+    await this.page.waitForTimeout(2500);
+    // Confirm the send actually happened: the composer clears its textarea on
+    // success. If it did NOT clear, treat as not sent so we retry and never log
+    // a false "Sent".
+    const remaining = (await area.inputValue().catch(() => '')) || '';
+    const sent = remaining.trim().length === 0;
+    if (!sent) {
+      await this.screenshot('avia-send-not-confirmed');
+      log.warn('Send did not clear the composer — message may NOT have been sent.');
+    }
+    return { verified: true, sent, filled };
   }
 }

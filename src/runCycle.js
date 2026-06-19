@@ -183,6 +183,10 @@ export async function runCycle() {
           summary.sent.push(c.id);
           rowsForReport.push(mkRow(c, { sent: 'так', result: 'Надіслано' }));
           log.info(`Sent to ${c.id} (${c.supplier}).`);
+        } else {
+          summary.errors.push(`${c.id}: send not confirmed`);
+          rowsForReport.push(mkRow(c, { sent: 'ні', result: 'Send не підтверджено — повтор' }));
+          log.warn(`${c.id}: verified but send NOT confirmed — will retry next cycle.`);
         }
         await client.closeChat();
       } catch (err) {
