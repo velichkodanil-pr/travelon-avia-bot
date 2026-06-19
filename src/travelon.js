@@ -410,8 +410,15 @@ export class AviaClient {
 
     if (dryRun) return { verified: true, sent: false, filled };
 
-    // The subject's auto-fill already enables Send; we do NOT touch the textarea
-    // (clearing/refilling can de-sync the form). Just send and confirm.
+    // Commit the message by TYPING the verified auto-fill text into the composer.
+    // The proven transfer bot does exactly this; in HEADLESS the auto-fill alone
+    // is apparently not registered as user input, so Send no-ops without it. We
+    // re-type the SAME text, preserving the exact wording.
+    await area.click().catch(() => {});
+    await area.fill('').catch(() => {});
+    await area.fill(filled).catch(() => {});
+    await this.page.waitForTimeout(400);
+
     if (audience === 'administrators') {
       const admins = await this.firstExisting(sel.chat.toAdministratorsButton, { timeout: 1500 });
       if (admins) await admins.click().catch(() => {});
@@ -423,22 +430,38 @@ export class AviaClient {
       throw new Error('Send button not found — verify sel.chat.sendButton.');
     }
     await send.scrollIntoViewIfNeeded().catch(() => {});
-    // Trigger via an IN-PAGE JS click: the composer's React onClick fires
-    // reliably this way. Playwright's coordinate click is a silent no-op on this
-    // fixed-position composer in headless (confirmed by manual testing — an
-    // in-page el.click() posts and clears the composer). Fall back to forced click.
-    await send.evaluate((el) => el.click()).catch(async () => {
-      await send.click({ timeout: 3000, force: true }).catch(() => {});
+
+    // Diagnostic: capture composer/send state right before sending.
+    const dbg = await this.page
+      .evaluate(() => {
+        const p = document.querySelector('div.fixed.top-0.right-0') || document;
+        const btns = Array.from(p.querySelectorAll('button')).filter((x) => x.textContent.trim() === 'Send');
+        const b = btns[0];
+        const ta = p.querySelector('textarea');
+        return {
+          hasFocus: document.hasFocus(),
+          sendEnabled: b ? !/cursor-not-allowed/.test(b.className) : null,
+          taLen: ta ? (ta.value || '').length : -1,
+          sendBtnCount: btns.length,
+        };
+      })
+      .catch(() => null);
+    log.info('[avia] pre-send: ' + JSON.stringify(dbg));
+
+    // Click Send the way the proven transfer bot does (Playwright click), with an
+    // in-page el.click() fallback.
+    await send.click({ timeout: 6000 }).catch(async () => {
+      await send.evaluate((el) => el.click()).catch(() => {});
     });
     await this.page.waitForTimeout(2500);
+
     // Confirm the send actually happened: the composer clears its textarea on
-    // success. If it did NOT clear, treat as not sent so we retry and never log
-    // a false "Sent".
+    // success. If it did NOT clear, treat as not sent so we retry (no false "Sent").
     const remaining = (await area.inputValue().catch(() => '')) || '';
     const sent = remaining.trim().length === 0;
     if (!sent) {
       await this.screenshot('avia-send-not-confirmed');
-      log.warn('Send did not clear the composer — message may NOT have been sent.');
+      log.warn('Send did not clear the composer — message may NOT have been sent. dbg=' + JSON.stringify(dbg));
     }
     return { verified: true, sent, filled };
   }
