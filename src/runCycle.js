@@ -117,6 +117,22 @@ export async function runCycle() {
           continue;
         }
 
+        // Pick the message profile by supplier: JETIT (+ UAH) -> pegasus
+        // (subject 84 + Transport Net amount); everyone else -> regular.
+        const isPegasus = config.pegasusSuppliers.some(
+          (n) => n.toLowerCase() === c.supplier.toLowerCase()
+        );
+        const prof = isPegasus ? config.message.pegasus : config.message.regular;
+
+        // Pegasus needs the booking's Transport Net amount (read from the edit page).
+        let transportNet = '';
+        if (prof.fillTransportNet) {
+          await client.openEdit(c.id);
+          transportNet = await client.readTransportNet();
+          if (transportNet) log.info(`${c.id}: Transport Net = ${transportNet} (Pegasus).`);
+          else log.warn(`${c.id}: Transport Net not found (Pegasus) — sending without amount.`);
+        }
+
         await client.openChat(c.id);
 
         if (await client.chatAlreadySent()) {
@@ -131,10 +147,11 @@ export async function runCycle() {
         const sendArgs = {
           bundleId: c.id,
           department: config.message.department,
-          subject: config.message.subject,
-          subjectRe: config.message.subjectRe,
-          expectedContains: config.message.expectedContains,
+          subject: prof.subject,
+          subjectRe: prof.subjectRe,
+          expectedContains: prof.expectedContains,
           audience: config.message.audience,
+          transportNet,
         };
 
         if (config.dryRun) {
@@ -182,8 +199,14 @@ export async function runCycle() {
           await markSent(c.id, { supplier: c.supplier });
           sends += 1;
           summary.sent.push(c.id);
-          rowsForReport.push(mkRow(c, { sent: 'так', result: 'Надіслано' }));
-          log.info(`Sent to ${c.id} (${c.supplier}).`);
+          rowsForReport.push(
+            mkRow(c, {
+              sent: 'так',
+              result: isPegasus ? 'Надіслано (Pegasus)' : 'Надіслано',
+              note: isPegasus && transportNet ? `Transport Net: ${transportNet}` : '',
+            })
+          );
+          log.info(`Sent to ${c.id} (${c.supplier})${isPegasus ? ' [Pegasus]' : ''}.`);
         } else {
           summary.errors.push(`${c.id}: send not confirmed`);
           rowsForReport.push(mkRow(c, { sent: 'ні', result: 'Send не підтверджено — повтор' }));

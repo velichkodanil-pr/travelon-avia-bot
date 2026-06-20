@@ -47,6 +47,17 @@ export function supplierLabelMatches(name, label) {
   return l.includes(n);
 }
 
+// Pegasus: replace the single " _ " placeholder ("штраф в розмірі _ євро")
+// with the booking's Transport Net amount, decimal-comma formatted
+// (810.43 -> 810,43). Returns { message, replaced }. Pure + unit-tested.
+export function applyTransportNet(text, transportNet) {
+  const message = String(text == null ? '' : text);
+  if (!transportNet) return { message, replaced: false };
+  const amt = String(transportNet).trim().replace(/\s/g, '').replace('.', ',');
+  const out = message.replace(/(\s)_(\s)/, '$1' + amt + '$2');
+  return { message: out, replaced: out !== message };
+}
+
 export class AviaClient {
   constructor() {
     this.browser = null;
@@ -412,7 +423,38 @@ export class AviaClient {
   // Core AVIA action: choose dept + subject, WAIT for the auto-filled text,
   // verify it contains `expectedContains`, then Send (unless dryRun). Never
   // overwrites the auto-filled text. Returns { verified, sent, filled }.
-  async verifyAndSendAvia({ bundleId, department, subject, subjectRe, expectedContains, audience, dryRun }) {
+  // Booking EDIT page (needed to read Transport Net for the Pegasus profile).
+  editUrl(id) {
+    return `${config.baseUrl}/book/bundle/edit/${id}`;
+  }
+
+  async openEdit(id) {
+    await this.page.goto(this.editUrl(id), { waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(2000);
+  }
+
+  // Transport "Net" from "Prices by modules" (input[name="transport[net_cost]"]).
+  async readTransportNet() {
+    return (
+      (await this.page
+        .evaluate(() => {
+          const el = document.querySelector('input[name="transport[net_cost]"]');
+          return el ? (el.value || '').trim() : '';
+        })
+        .catch(() => '')) || ''
+    );
+  }
+
+  async verifyAndSendAvia({
+    bundleId,
+    department,
+    subject,
+    subjectRe,
+    expectedContains,
+    audience,
+    dryRun,
+    transportNet,
+  }) {
     const dept = await this.firstExisting(sel.chat.departmentSelect, { timeout: 6000 });
     const area = await this.firstExisting(sel.chat.textArea, { timeout: 3000 });
     if (!dept || !area) {
@@ -450,6 +492,15 @@ export class AviaClient {
     }
 
     if (dryRun) return { verified: true, sent: false, filled };
+
+    // Pegasus profile: replace the single " _ " placeholder ("штраф в розмірі _
+    // євро") with the booking's Transport Net amount, using a decimal comma
+    // (810.43 -> 810,43). Other profiles leave the text untouched.
+    const { message, replaced: amtReplaced } = applyTransportNet(filled, transportNet);
+    if (transportNet) {
+      if (amtReplaced) log.info(`[avia] ${bundleId}: inserted Transport Net into Pegasus message.`);
+      else log.warn(`[avia] ${bundleId}: ' _ ' placeholder not found; sending without amount.`);
+    }
 
     // The UI Send button does NOT fire under browser automation (every click
     // method posts nothing), so transmit the exact request the working UI makes:
@@ -491,7 +542,7 @@ export class AviaClient {
             return { ok: false, status: 0, error: String(e) };
           }
         },
-        { bundleId, message: filled, forAdmin: audience === 'administrators', deptId, typeId }
+        { bundleId, message, forAdmin: audience === 'administrators', deptId, typeId }
       )
       .catch((e) => ({ ok: false, status: 0, error: String(e) }));
     const sent = Boolean(res && res.ok && res.status >= 200 && res.status < 300);

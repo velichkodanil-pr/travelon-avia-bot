@@ -37,7 +37,9 @@ async function main() {
   log.info(` statuses  : ${config.targetStatuses.join(', ')}`);
   log.info(` bookingDt : ${config.bookingDateMode}`);
   log.info(` department: ${config.message.department}`);
-  log.info(` subject   : ${config.message.subject}`);
+  log.info(` subject(r): ${config.message.regular.subject}`);
+  log.info(` subject(p): ${config.message.pegasus.subject}`);
+  log.info(` pegasus   : ${config.pegasusSuppliers.join(', ')}`);
   log.info(` report    : ${config.report.enabled ? 'ON' : 'off'} (tab "${config.report.sheetName}")`);
   log.info('============================================================');
 

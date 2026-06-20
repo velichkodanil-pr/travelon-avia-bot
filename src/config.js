@@ -49,6 +49,8 @@ export const config = {
     'Tickets.ua',
     'Fly One Avia',
     'Skyup',
+    'JETIT',
+    'JETIT UAH',
   ]),
   supplierIdsOverride: list(process.env.AVIA_SUPPLIER_IDS, []),
 
@@ -65,25 +67,43 @@ export const config = {
   // 'today_or_later' -> today and later (rarely needed).
   bookingDateMode: (process.env.AVIA_BOOKING_DATE || 'today').toLowerCase(),
 
-  // --- the message ---------------------------------------------------------
+  // --- the messages --------------------------------------------------------
+  // Department is shared. Each supplier uses one of two message PROFILES:
+  //   regular -> subject "Бронювання на регулярному рейсі (ТІКЕТСИ\ДРСТ\СКАЙ АП)"
+  //   pegasus -> subject "Бронювання авіаквитків Pegasus" (JETIT): the single
+  //              " _ " in the auto-filled text is replaced with the booking's
+  //              Transport Net amount (Prices by modules).
   message: {
-    // Department option label in the chat composer.
     department: process.env.AVIA_DEPARTMENT || 'Авіа',
-    // Message-subject option label. Backslashes are literal in the live UI.
-    subject:
-      process.env.AVIA_SUBJECT ||
-      'Бронювання на регулярному рейсі (ТІКЕТСИ\\ДРСТ\\СКАЙ АП)',
-    // Loose regex used to find the subject <option> if the exact label differs
-    // slightly. Uses \S (not \w) so it matches Cyrillic letters.
-    subjectRe: new RegExp(process.env.AVIA_SUBJECT_RE || 'регулярн\\S*\\s*рейс', 'i'),
-    // After choosing dept+subject the site AUTO-FILLS the textarea. The bot
-    // verifies the filled text CONTAINS this phrase before sending. It never
-    // overwrites the auto-filled text.
-    expectedContains:
-      process.env.AVIA_EXPECTED_CONTAINS || 'заброньований на регулярному рейсі',
-    // Recipient: "everyone" (default) or "administrators".
     audience: (process.env.AVIA_AUDIENCE || 'everyone').toLowerCase(),
+    regular: {
+      subject:
+        process.env.AVIA_SUBJECT ||
+        'Бронювання на регулярному рейсі (ТІКЕТСИ\\ДРСТ\\СКАЙ АП)',
+      // \S (not \w) so it matches Cyrillic; must uniquely hit the regular subject.
+      subjectRe: new RegExp(
+        process.env.AVIA_SUBJECT_RE || 'Бронювання\\s+на\\s+регулярному\\s+рейс',
+        'i'
+      ),
+      expectedContains:
+        process.env.AVIA_EXPECTED_CONTAINS || 'заброньований на регулярному рейсі',
+      fillTransportNet: false,
+    },
+    pegasus: {
+      subject: process.env.AVIA_PEGASUS_SUBJECT || 'Бронювання авіаквитків Pegasus',
+      subjectRe: new RegExp(
+        process.env.AVIA_PEGASUS_SUBJECT_RE || 'Бронювання\\s+авіаквитків\\s+Pegasus',
+        'i'
+      ),
+      expectedContains:
+        process.env.AVIA_PEGASUS_EXPECTED_CONTAINS || 'заброньований на регулярному рейсі',
+      fillTransportNet: true,
+    },
   },
+
+  // Supplier NAMES that use the "pegasus" profile (subject 84 + Transport Net
+  // amount inserted). Every other supplier uses "regular".
+  pegasusSuppliers: list(process.env.AVIA_PEGASUS_SUPPLIERS, ['JETIT', 'JETIT UAH']),
 
   // --- browser ---
   headless: bool(process.env.HEADLESS, true),
@@ -189,6 +209,7 @@ export function validateConfig() {
   if (!config.supplierNames.length) problems.push('AVIA_SUPPLIERS is empty');
   if (!config.targetStatuses.length) problems.push('AVIA_STATUSES is empty');
   if (!config.message.department) problems.push('AVIA_DEPARTMENT is empty');
-  if (!config.message.subject) problems.push('AVIA_SUBJECT is empty');
+  if (!config.message.regular.subject) problems.push('AVIA_SUBJECT (regular) is empty');
+  if (!config.message.pegasus.subject) problems.push('AVIA_PEGASUS_SUBJECT is empty');
   return problems;
 }
