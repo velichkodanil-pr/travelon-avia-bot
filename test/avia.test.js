@@ -57,7 +57,7 @@ test('config defaults are the AVIA criteria', () => {
     'JETIT',
     'JETIT UAH',
   ]);
-  assert.deepEqual(config.targetStatuses, ['New reservation', 'In Work', 'Confirmed Print']);
+  assert.deepEqual(config.targetStatuses, ['In Work']);
   // Regular sends from "Авіа"; Pegasus (JETIT) sends from "Бронювання".
   assert.equal(config.message.regular.department, 'Авіа');
   assert.equal(config.message.pegasus.department, 'Бронювання');

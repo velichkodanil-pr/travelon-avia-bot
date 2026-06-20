@@ -56,11 +56,7 @@ export const config = {
 
   // --- matching: statuses --------------------------------------------------
   // Status labels exactly as they appear in the Status filter / row text.
-  targetStatuses: list(process.env.AVIA_STATUSES, [
-    'New reservation',
-    'In Work',
-    'Confirmed Print',
-  ]),
+  targetStatuses: list(process.env.AVIA_STATUSES, ['In Work']),
 
   // --- matching: booking date ----------------------------------------------
   // 'today'          -> only requests whose booking (request) date is today.
