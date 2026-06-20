@@ -74,9 +74,9 @@ export const config = {
   //              " _ " in the auto-filled text is replaced with the booking's
   //              Transport Net amount (Prices by modules).
   message: {
-    department: process.env.AVIA_DEPARTMENT || 'Авіа',
     audience: (process.env.AVIA_AUDIENCE || 'everyone').toLowerCase(),
     regular: {
+      department: process.env.AVIA_DEPARTMENT || 'Авіа',
       subject:
         process.env.AVIA_SUBJECT ||
         'Бронювання на регулярному рейсі (ТІКЕТСИ\\ДРСТ\\СКАЙ АП)',
@@ -90,6 +90,7 @@ export const config = {
       fillTransportNet: false,
     },
     pegasus: {
+      department: process.env.AVIA_PEGASUS_DEPARTMENT || 'Бронювання',
       subject: process.env.AVIA_PEGASUS_SUBJECT || 'Бронювання авіаквитків Pegasus',
       subjectRe: new RegExp(
         process.env.AVIA_PEGASUS_SUBJECT_RE || 'Бронювання\\s+авіаквитків\\s+Pegasus',
@@ -208,7 +209,8 @@ export function validateConfig() {
   if (!config.password) problems.push('TRAVELON_PASSWORD is not set');
   if (!config.supplierNames.length) problems.push('AVIA_SUPPLIERS is empty');
   if (!config.targetStatuses.length) problems.push('AVIA_STATUSES is empty');
-  if (!config.message.department) problems.push('AVIA_DEPARTMENT is empty');
+  if (!config.message.regular.department) problems.push('AVIA_DEPARTMENT is empty');
+  if (!config.message.pegasus.department) problems.push('AVIA_PEGASUS_DEPARTMENT is empty');
   if (!config.message.regular.subject) problems.push('AVIA_SUBJECT (regular) is empty');
   if (!config.message.pegasus.subject) problems.push('AVIA_PEGASUS_SUBJECT is empty');
   return problems;

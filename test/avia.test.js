@@ -58,7 +58,9 @@ test('config defaults are the AVIA criteria', () => {
     'JETIT UAH',
   ]);
   assert.deepEqual(config.targetStatuses, ['New reservation', 'In Work', 'Confirmed Print']);
-  assert.equal(config.message.department, 'Авіа');
+  // Regular sends from "Авіа"; Pegasus (JETIT) sends from "Бронювання".
+  assert.equal(config.message.regular.department, 'Авіа');
+  assert.equal(config.message.pegasus.department, 'Бронювання');
   assert.equal(config.bookingDateMode, 'today');
   assert.equal(config.checkCron, '*/5 * * * *');
   // Regular subject keeps the literal backslashes.
