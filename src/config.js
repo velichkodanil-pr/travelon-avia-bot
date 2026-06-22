@@ -82,7 +82,7 @@ export const config = {
         'i'
       ),
       expectedContains:
-        process.env.AVIA_EXPECTED_CONTAINS || 'заброньований на регулярному рейсі',
+        process.env.AVIA_EXPECTED_CONTAINS || 'заброньований на регулярн',
       fillTransportNet: false,
     },
     pegasus: {
@@ -93,7 +93,7 @@ export const config = {
         'i'
       ),
       expectedContains:
-        process.env.AVIA_PEGASUS_EXPECTED_CONTAINS || 'заброньований на регулярному рейсі',
+        process.env.AVIA_PEGASUS_EXPECTED_CONTAINS || 'заброньований на регулярн',
       fillTransportNet: true,
     },
   },

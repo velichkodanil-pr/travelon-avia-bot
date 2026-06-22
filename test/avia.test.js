@@ -11,12 +11,12 @@ import { config, ALREADY_SENT_PATTERNS } from '../src/config.js';
 // The real auto-filled message text (per the operator's spec).
 const AUTOFILL_SAMPLE =
   'Шановні колеги, доброго дня!\n' +
-  'Інформуємо, що ваш тур заброньований на регулярному рейсі. ' +
+  'Інформуємо, що ваш тур заброньований на регулярний рейс. ' +
   'Просимо звернути увагу, що зміни/повернення регулюються правилами тарифу.';
 
 // Pegasus auto-fill carries the single " _ " placeholder for the penalty amount.
 const PEGASUS_SAMPLE =
-  'Шановні колеги! Ваш тур заброньований на регулярному рейсі Pegasus. ' +
+  'Шановні колеги! Ваш тур заброньований на регулярний рейс Pegasus. ' +
   'У разі ануляції утримується штраф в розмірі _ євро згідно правил тарифу.';
 
 test('ddmmyyyyToISO parses date and datetime', () => {
