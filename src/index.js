@@ -12,11 +12,28 @@ async function safeRun(trigger) {
     return;
   }
   running = true;
+  let watchdog;
   try {
-    await runCycle();
+    await Promise.race([
+      runCycle(),
+      new Promise((_, reject) => {
+        watchdog = setTimeout(
+          () => reject(new Error(`cycle exceeded ${config.cycleTimeoutMs}ms watchdog`)),
+          config.cycleTimeoutMs
+        );
+      }),
+    ]);
   } catch (err) {
     log.error('Unhandled cycle error:', err);
+    if (String((err && err.message) || '').includes('watchdog')) {
+      // A hung Playwright/browser op can't be reliably cleared in-process, so
+      // exit and let Railway relaunch with a fresh browser. The lock resets too.
+      log.error('Cycle watchdog fired — exiting so the platform restarts the bot.');
+      clearTimeout(watchdog);
+      process.exit(1);
+    }
   } finally {
+    clearTimeout(watchdog);
     running = false;
   }
 }
@@ -34,7 +51,14 @@ async function main() {
   log.info(` mode      : ${config.dryRun ? 'DRY-RUN (no messages sent)' : 'LIVE (will send)'}`);
   log.info(` schedule  : "${config.checkCron}"  tz=${config.tz}`);
   log.info(` suppliers : ${config.supplierNames.join(', ')}`);
-  log.info(` statuses  : ${config.targetStatuses.join(', ')}`);
+  log.info(
+    ` statuses  : ${
+      config.targetStatuses.length
+        ? config.targetStatuses.join(', ')
+        : 'ALL except ' + config.excludeStatuses.join('/')
+    }`
+  );
+  log.info(` watchdog  : cycle ${config.cycleTimeoutMs}ms | supplier ${config.supplierScanTimeoutMs}ms`);
   log.info(` bookingDt : ${config.bookingDateMode}`);
   log.info(` dept(r)   : ${config.message.regular.department}`);
   log.info(` subject(r): ${config.message.regular.subject}`);

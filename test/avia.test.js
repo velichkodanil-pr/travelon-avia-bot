@@ -57,7 +57,9 @@ test('config defaults are the AVIA criteria', () => {
     'JETIT',
     'JETIT UAH',
   ]);
-  assert.deepEqual(config.targetStatuses, ['In Work']);
+  // Empty allow-list = process every status; Canceled is excluded.
+  assert.deepEqual(config.targetStatuses, []);
+  assert.deepEqual(config.excludeStatuses, ['Canceled', 'Cancelled']);
   // Regular sends from "Авіа"; Pegasus (JETIT) sends from "Бронювання".
   assert.equal(config.message.regular.department, 'Авіа');
   assert.equal(config.message.pegasus.department, 'Бронювання');

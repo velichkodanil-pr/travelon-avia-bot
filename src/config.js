@@ -56,7 +56,18 @@ export const config = {
 
   // --- matching: statuses --------------------------------------------------
   // Status labels exactly as they appear in the Status filter / row text.
-  targetStatuses: list(process.env.AVIA_STATUSES, ['In Work']),
+  // Optional status ALLOW-list. Empty (default) = process EVERY status except
+  // those in excludeStatuses (user wants "any status except Canceled").
+  targetStatuses: list(process.env.AVIA_STATUSES, []),
+  // Statuses to skip, matched as a case-insensitive SUBSTRING of the row status.
+  // Real TravelON label is "Canceled" (one L); "Cancelled" kept for safety.
+  excludeStatuses: list(process.env.AVIA_EXCLUDE_STATUSES, ['Canceled', 'Cancelled']),
+  // Safety watchdog timeouts (ms). cycleTimeoutMs: a whole cycle exceeding this
+  // makes the process exit so Railway relaunches with a fresh browser (a hung
+  // page can never freeze the bot forever). supplierScanTimeoutMs: one supplier
+  // scan exceeding this is skipped so the rest of the cycle still runs.
+  cycleTimeoutMs: Number(process.env.CYCLE_TIMEOUT_MS) || 8 * 60 * 1000,
+  supplierScanTimeoutMs: Number(process.env.SUPPLIER_SCAN_TIMEOUT_MS) || 2 * 60 * 1000,
 
   // --- matching: booking date ----------------------------------------------
   // 'today'          -> only requests whose booking (request) date is today.
@@ -204,7 +215,6 @@ export function validateConfig() {
   if (!config.email) problems.push('TRAVELON_EMAIL is not set');
   if (!config.password) problems.push('TRAVELON_PASSWORD is not set');
   if (!config.supplierNames.length) problems.push('AVIA_SUPPLIERS is empty');
-  if (!config.targetStatuses.length) problems.push('AVIA_STATUSES is empty');
   if (!config.message.regular.department) problems.push('AVIA_DEPARTMENT is empty');
   if (!config.message.pegasus.department) problems.push('AVIA_PEGASUS_DEPARTMENT is empty');
   if (!config.message.regular.subject) problems.push('AVIA_SUBJECT (regular) is empty');

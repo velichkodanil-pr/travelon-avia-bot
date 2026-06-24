@@ -10,6 +10,17 @@ import { reportEnabled, upsertRows } from './report.js';
 
 const DASH = '—';
 
+// Reject if `p` doesn't settle within `ms`, so one hung Playwright call can't
+// freeze a whole cycle. The underlying op is abandoned (not truly cancelled);
+// the cycle watchdog in index.js is the final safety net.
+function withTimeout(p, ms, label) {
+  let t;
+  const guard = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([p, guard]).finally(() => clearTimeout(t));
+}
+
 function matchesBookingDate(iso, today) {
   if (!iso) return false;
   return config.bookingDateMode === 'today_or_later' ? iso >= today : iso === today;
@@ -22,7 +33,13 @@ function parseRow(row, supplierName, today) {
   const idM = flat.match(/\b(\d{5})\b/);
   if (!idM) return null;
   const status = (row.status || '').trim();
-  const okStatus = config.targetStatuses.some((s) => s.toLowerCase() === status.toLowerCase());
+  const sl = status.toLowerCase();
+  // Skip excluded statuses (Canceled) — substring match for spelling safety.
+  if (config.excludeStatuses.some((s) => s && sl.includes(s.toLowerCase()))) return null;
+  // Empty allow-list = accept every (non-excluded) status.
+  const okStatus =
+    config.targetStatuses.length === 0 ||
+    config.targetStatuses.some((s) => s.toLowerCase() === sl);
   if (!okStatus) return null;
   const iso = ddmmyyyyToISO(row.bookingDate);
   if (!matchesBookingDate(iso, today)) return null;
@@ -76,32 +93,43 @@ export async function runCycle() {
         log.warn(`Supplier "${sup.name}" not found in the partner dropdown — skipping.`);
         continue;
       }
-      await client.applySupplierFilter(sup.id, statusIds);
-      let prevFirstId = null;
-      let supCount = 0;
-      for (let page = 1; page <= config.maxListPages; page++) {
-        if (page > 1) await client.goToPage(page);
-        const rows = await client.scanRows();
-        const ids = rows.map((r) => (r.text.match(/\b(\d{5})\b/) || [])[1]).filter(Boolean);
-        if (!ids.length) break;
-        if (prevFirstId && ids[0] === prevFirstId) break; // same page repeated -> end
-        prevFirstId = ids[0];
-        let todayOnPage = 0;
-        for (const r of rows) {
-          const c = parseRow(r, sup.name, today);
-          if (!c) continue;
-          todayOnPage += 1;
-          if (!seen.has(c.id)) {
-            seen.add(c.id);
-            candidates.push(c);
-            supCount += 1;
-          }
-        }
-        // List is date-desc: once a page (that had id-rows) yields no today
-        // requests, the rest are older — stop paging this supplier.
-        if (todayOnPage === 0) break;
+      try {
+        await withTimeout(
+          (async () => {
+            await client.applySupplierFilter(sup.id, statusIds);
+            let prevFirstId = null;
+            let supCount = 0;
+            for (let page = 1; page <= config.maxListPages; page++) {
+              if (page > 1) await client.goToPage(page);
+              const rows = await client.scanRows();
+              const ids = rows.map((r) => (r.text.match(/\b(\d{5})\b/) || [])[1]).filter(Boolean);
+              if (!ids.length) break;
+              if (prevFirstId && ids[0] === prevFirstId) break; // same page repeated -> end
+              prevFirstId = ids[0];
+              let todayOnPage = 0;
+              for (const r of rows) {
+                const c = parseRow(r, sup.name, today);
+                if (!c) continue;
+                todayOnPage += 1;
+                if (!seen.has(c.id)) {
+                  seen.add(c.id);
+                  candidates.push(c);
+                  supCount += 1;
+                }
+              }
+              // List is date-desc: once a page (that had id-rows) yields no today
+              // requests, the rest are older — stop paging this supplier.
+              if (todayOnPage === 0) break;
+            }
+            log.info(`${sup.name}: ${supCount} request(s) today`);
+          })(),
+          config.supplierScanTimeoutMs,
+          `scan ${sup.name}`
+        );
+      } catch (err) {
+        summary.errors.push(`scan ${sup.name}: ${err.message}`);
+        log.warn(`Supplier ${sup.name} scan failed/timed out — skipping: ${err.message}`);
       }
-      log.info(`${sup.name}: ${supCount} request(s) today`);
     }
     summary.matched = candidates.map((c) => `${c.id}/${c.supplier}`);
     log.info(`Matched ${candidates.length}: ${summary.matched.join(', ') || DASH}`);
