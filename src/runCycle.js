@@ -6,7 +6,7 @@ import { config } from './config.js';
 import { log } from './logger.js';
 import { wasSent, markSent } from './store.js';
 import { notify, notifyEnabled } from './notify.js';
-import { reportEnabled, upsertRows } from './report.js';
+import { reportEnabled, upsertRows, writeHeartbeat } from './report.js';
 
 const DASH = '—';
 
@@ -281,6 +281,16 @@ export async function runCycle() {
     } catch (e) {
       log.warn('Report update failed (continuing): ' + e.message);
     }
+
+    // Liveness heartbeat — proof the bot is alive even on quiet cycles.
+    await writeHeartbeat({
+      mode: config.dryRun ? 'DRY-RUN' : 'LIVE',
+      took,
+      matched: summary.matched.length,
+      sent: config.dryRun ? summary.wouldSend.length : summary.sent.length,
+      errors: summary.errors,
+      cycleFailed: summary.errors.some((e) => e.startsWith('cycle:')),
+    });
   }
 
   return summary;

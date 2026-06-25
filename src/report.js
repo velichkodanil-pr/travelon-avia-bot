@@ -142,3 +142,98 @@ export async function upsertRows(rows) {
   log.info(`[report] Google Sheet: ${updated} оновлено, ${appends.length} додано.`);
   return { updated, appended: appends.length };
 }
+
+// --- Heartbeat / liveness panel -------------------------------------------
+// Every cycle we paint a small status block in the top-right of the data tab
+// (cols J:K), so the sheet shows the bot is ALIVE even on quiet cycles where
+// no booking rows are written. The "Оновлено" timestamp is the real proof of
+// life — if it stops advancing, the bot is down. The band cell is green when
+// the last cycle was clean, red when it had errors. Best-effort: never throws.
+const HB_START_COL = 9; // 0-based col J. Header is A:H (8 cols); col I stays
+                        // empty as a separator so values.append's A1-table
+                        // detection never swallows this block.
+let _hbTabCache = null;
+
+async function hbTabMeta(sheets) {
+  if (_hbTabCache) return _hbTabCache;
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: config.report.spreadsheetId });
+  const list = meta.data.sheets || [];
+  let props = list[0]?.properties;
+  if (config.report.sheetName) {
+    const m = list.find((s) => s.properties?.title === config.report.sheetName);
+    if (m) props = m.properties;
+  }
+  _hbTabCache = { title: props?.title || 'Avia', sheetId: props?.sheetId ?? 0 };
+  return _hbTabCache;
+}
+
+export async function writeHeartbeat(info = {}) {
+  if (!reportEnabled()) return;
+  try {
+    const sheets = await getSheets();
+    const { sheetId } = await hbTabMeta(sheets);
+
+    const errs = Array.isArray(info.errors) ? info.errors : [];
+    const healthy = errs.length === 0 && !info.cycleFailed;
+    const band = healthy
+      ? { bg: { red: 0.13, green: 0.55, blue: 0.27 }, label: '🟢 БОТ АКТИВНИЙ' }
+      : { bg: { red: 0.80, green: 0.25, blue: 0.20 }, label: '⚠️ АКТИВНИЙ — ПОМИЛКИ' };
+
+    const white = { red: 1, green: 1, blue: 1 };
+    const bandFmt = {
+      backgroundColor: band.bg,
+      horizontalAlignment: 'CENTER',
+      textFormat: { bold: true, fontSize: 11, foregroundColor: white },
+    };
+    const labelFmt = { horizontalAlignment: 'RIGHT', textFormat: { bold: true } };
+    const valFmt = { horizontalAlignment: 'LEFT' };
+
+    const B = (v) => ({ userEnteredValue: { stringValue: v }, userEnteredFormat: bandFmt });
+    const L = (v) => ({ userEnteredValue: { stringValue: v }, userEnteredFormat: labelFmt });
+    const S = (v) => ({ userEnteredValue: { stringValue: String(v ?? '') }, userEnteredFormat: valFmt });
+
+    const ts = nowInTz();
+    const sentLabel = info.mode === 'DRY-RUN' ? 'Відправив би' : 'Надіслано';
+    const rows = [
+      { values: [B(band.label), B('')] },
+      { values: [L('Оновлено'), S(`${ts} (${config.tz})`)] },
+      { values: [L('Режим'), S(info.mode || '')] },
+      { values: [L('Останній цикл'), S(info.took != null ? `${info.took} c` : '')] },
+      { values: [L('Знайдено сьогодні'), S(info.matched ?? 0)] },
+      { values: [L(sentLabel), S(info.sent ?? 0)] },
+      { values: [L('Помилки'), S(errs.length ? errs.join(' | ') : '—')] },
+    ];
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: config.report.spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            updateCells: {
+              start: { sheetId, rowIndex: 0, columnIndex: HB_START_COL },
+              rows,
+              fields: 'userEnteredValue,userEnteredFormat',
+            },
+          },
+          {
+            updateDimensionProperties: {
+              range: { sheetId, dimension: 'COLUMNS', startIndex: HB_START_COL, endIndex: HB_START_COL + 1 },
+              properties: { pixelSize: 180 },
+              fields: 'pixelSize',
+            },
+          },
+          {
+            updateDimensionProperties: {
+              range: { sheetId, dimension: 'COLUMNS', startIndex: HB_START_COL + 1, endIndex: HB_START_COL + 2 },
+              properties: { pixelSize: 280 },
+              fields: 'pixelSize',
+            },
+          },
+        ],
+      },
+    });
+    log.info(`[report] Heartbeat: ${healthy ? '🟢 active' : '⚠️ active+errors'} @ ${ts}`);
+  } catch (e) {
+    log.warn('[report] Heartbeat update failed (continuing): ' + e.message);
+  }
+}
