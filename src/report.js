@@ -167,11 +167,31 @@ async function hbTabMeta(sheets) {
   return _hbTabCache;
 }
 
+// Count bookings marked "Відправлено = так" (col E) grouped by booking date
+// (col D). `rows` = A:H value arrays without the header. -> Map<dateISO, count>.
+export function tallySentByDay(rows) {
+  const counts = new Map();
+  for (const r of rows || []) {
+    const date = (r && r[3] != null ? r[3] : '').toString().trim();
+    const sent = (r && r[4] != null ? r[4] : '').toString().trim().toLowerCase();
+    if (!date) continue;
+    if (sent === 'так') counts.set(date, (counts.get(date) || 0) + 1);
+  }
+  return counts;
+}
+
+// Map<date,count> -> [[date,count], ...], newest date first, capped to `limit`.
+export function topSentDays(counts, limit = 31) {
+  return [...counts.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0))
+    .slice(0, limit);
+}
+
 export async function writeHeartbeat(info = {}) {
   if (!reportEnabled()) return;
   try {
     const sheets = await getSheets();
-    const { sheetId } = await hbTabMeta(sheets);
+    const { sheetId, title } = await hbTabMeta(sheets);
 
     const errs = Array.isArray(info.errors) ? info.errors : [];
     const healthy = errs.length === 0 && !info.cycleFailed;
@@ -203,6 +223,34 @@ export async function writeHeartbeat(info = {}) {
       { values: [L(sentLabel), S(info.sent ?? 0)] },
       { values: [L('Помилки'), S(errs.length ? errs.join(' | ') : '—')] },
     ];
+
+    // Daily "sent" statistics, painted directly under the status panel (J:K),
+    // newest day on top. Counts col E="так" grouped by booking date (col D).
+    const STATS_DAYS = 31;
+    let dayPairs = [];
+    try {
+      const vres = await sheets.spreadsheets.values.get({
+        spreadsheetId: config.report.spreadsheetId,
+        range: `${title}!A2:H100000`,
+      });
+      dayPairs = topSentDays(tallySentByDay(vres.data.values || []), STATS_DAYS);
+    } catch (e) {
+      log.warn('[report] daily-stats read failed (continuing): ' + e.message);
+    }
+    const grandTotal = dayPairs.reduce((a, p) => a + p[1], 0);
+    const headerFmt = {
+      backgroundColor: { red: 0.2, green: 0.21, blue: 0.24 },
+      horizontalAlignment: 'CENTER',
+      textFormat: { bold: true, foregroundColor: white },
+    };
+    const H = (v) => ({ userEnteredValue: { stringValue: v }, userEnteredFormat: headerFmt });
+    rows.push({ values: [S(''), S('')] }); // separator row
+    rows.push({ values: [H('📊 НАДІСЛАНО ПО ДНЯХ'), H('')] });
+    for (let i = 0; i < STATS_DAYS; i++) {
+      if (i < dayPairs.length) rows.push({ values: [L(dayPairs[i][0]), S(dayPairs[i][1])] });
+      else rows.push({ values: [S(''), S('')] }); // blank slot (clears stale)
+    }
+    rows.push({ values: [L('Всього'), S(grandTotal)] });
 
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: config.report.spreadsheetId,

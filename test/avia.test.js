@@ -7,6 +7,7 @@ import {
   applyTransportNet,
 } from '../src/travelon.js';
 import { config, ALREADY_SENT_PATTERNS } from '../src/config.js';
+import { tallySentByDay, topSentDays } from '../src/report.js';
 
 // The real auto-filled message text (per the operator's spec).
 const AUTOFILL_SAMPLE =
@@ -140,4 +141,41 @@ test('ALREADY_SENT_PATTERNS detect the auto-fill in chat history (dedup)', () =>
     ALREADY_SENT_PATTERNS.some((re) => re.test(unrelated)),
     false
   );
+});
+
+
+test('tallySentByDay counts "так" rows grouped by booking date (col D/E)', () => {
+  // Columns A..H: [id, supplier, status, bookingDate, sent, updatedAt, result, note]
+  const rows = [
+    ['60643', 'Skyup', 'In Work', '2026-06-19', 'так', 't', 'Надіслано', ''],
+    ['60676', 'Tickets.ua', 'In Work', '2026-06-19', 'так', 't', 'Надіслано раніше (журнал)', ''],
+    ['60685', 'Skyup', 'In Work', '2026-06-19', 'ні', 't', 'Send не підтверджено', ''],
+    ['60707', 'JETIT', 'In Work', '2026-06-20', 'так', 't', 'Надіслано (Pegasus)', ''],
+    ['60698', 'Skyup', 'In Work', '2026-06-20', 'так', 't', 'Вже надіслано у чаті', ''],
+    ['', '', '', '', '', '', '', ''],
+  ];
+  const counts = tallySentByDay(rows);
+  assert.equal(counts.get('2026-06-19'), 2);
+  assert.equal(counts.get('2026-06-20'), 2);
+  assert.equal(counts.size, 2);
+  // Empty input is safe.
+  assert.equal(tallySentByDay([]).size, 0);
+  assert.equal(tallySentByDay(undefined).size, 0);
+});
+
+test('topSentDays sorts newest date first and caps to the limit', () => {
+  const counts = new Map([
+    ['2026-06-19', 2],
+    ['2026-06-21', 5],
+    ['2026-06-20', 3],
+  ]);
+  assert.deepEqual(topSentDays(counts), [
+    ['2026-06-21', 5],
+    ['2026-06-20', 3],
+    ['2026-06-19', 2],
+  ]);
+  assert.deepEqual(topSentDays(counts, 2), [
+    ['2026-06-21', 5],
+    ['2026-06-20', 3],
+  ]);
 });
