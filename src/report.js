@@ -75,18 +75,12 @@ async function getSheets() {
   return google.sheets({ version: 'v4', auth });
 }
 
-async function resolveTab(sheets) {
-  if (config.report.sheetName) return config.report.sheetName;
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: config.report.spreadsheetId });
-  return meta.data.sheets?.[0]?.properties?.title || 'Avia';
-}
-
 // Upsert рядків по № заявки (стовпець A). Повертає { updated, appended }.
 export async function upsertRows(rows) {
   if (!rows || !rows.length) return { updated: 0, appended: 0 };
   const r = config.report;
   const sheets = await getSheets();
-  const tab = await resolveTab(sheets);
+  const { title: tab, sheetId } = await hbTabMeta(sheets);
   const updatedAt = nowInTz();
 
   const getRes = await sheets.spreadsheets.values.get({
@@ -123,18 +117,43 @@ export async function upsertRows(rows) {
     }
   }
 
+  // 1) Update existing rows in place — their positions are still valid here.
   if (data.length) {
     await sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: r.spreadsheetId,
       requestBody: { valueInputOption: 'USER_ENTERED', data },
     });
   }
+  // 2) New rows go on TOP (newest first): insert blank cells in A:H at row 2 —
+  //    shifting ONLY A:H down so the J:K status/stats panel stays put — then
+  //    write the new values into the freed block.
   if (appends.length) {
-    await sheets.spreadsheets.values.append({
+    const n = appends.length;
+    if (idToRow.size > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: r.spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              insertRange: {
+                range: {
+                  sheetId,
+                  startRowIndex: 1,
+                  endRowIndex: 1 + n,
+                  startColumnIndex: 0,
+                  endColumnIndex: HEADER.length,
+                },
+                shiftDimension: 'ROWS',
+              },
+            },
+          ],
+        },
+      });
+    }
+    await sheets.spreadsheets.values.update({
       spreadsheetId: r.spreadsheetId,
-      range: `${tab}!A1`,
+      range: `${tab}!A2:${LAST_COL}${1 + n}`,
       valueInputOption: 'USER_ENTERED',
-      insertDataOption: 'INSERT_ROWS',
       requestBody: { values: appends },
     });
   }
