@@ -5,6 +5,15 @@ import { log } from './logger.js';
 import { runCycle } from './runCycle.js';
 
 let running = false;
+let consecutiveBrowserFails = 0;
+const START_AT = Date.now();
+
+// Errors meaning Chromium could not launch/operate — typically resource
+// exhaustion on a long-lived container. A fresh process fixes it, so we exit and
+// let Railway relaunch. The watchdog covers HANGS; this covers FAST-FAIL launch
+// errors (which complete in <1s, so the watchdog never fires).
+const BROWSER_FAIL_RE =
+  /browserType\.launch|browserContext\.newPage|Target (page|context|browser)|pthread_create|Resource temporarily unavailable|Failed to launch|has been closed|Cannot allocate memory/i;
 
 async function safeRun(trigger) {
   if (running) {
@@ -14,7 +23,7 @@ async function safeRun(trigger) {
   running = true;
   let watchdog;
   try {
-    await Promise.race([
+    const summary = await Promise.race([
       runCycle(),
       new Promise((_, reject) => {
         watchdog = setTimeout(
@@ -23,6 +32,22 @@ async function safeRun(trigger) {
         );
       }),
     ]);
+    // Auto-heal: if the browser can't launch/operate (usually resource
+    // exhaustion after long uptime), exit after a few tries so Railway
+    // relaunches with a fresh container. These cycles fail in <1s, so the
+    // watchdog never catches them — hence this explicit check.
+    const errs = (summary && summary.errors) || [];
+    if (errs.some((e) => BROWSER_FAIL_RE.test(String(e)))) {
+      consecutiveBrowserFails += 1;
+      log.error(`Browser launch/operate failure #${consecutiveBrowserFails}: ${errs.join(' | ')}`);
+      if (consecutiveBrowserFails >= config.browserFailRestartThreshold) {
+        log.error('Browser cannot start (likely resource exhaustion) — exiting so the platform restarts with a fresh container.');
+        clearTimeout(watchdog);
+        process.exit(1);
+      }
+    } else {
+      consecutiveBrowserFails = 0;
+    }
   } catch (err) {
     log.error('Unhandled cycle error:', err);
     if (String((err && err.message) || '').includes('watchdog')) {
@@ -35,6 +60,13 @@ async function safeRun(trigger) {
   } finally {
     clearTimeout(watchdog);
     running = false;
+  }
+
+  // Preemptive periodic restart: before a multi-day container leaks enough to
+  // break Chromium, exit after maxUptimeMs of uptime so Railway starts fresh.
+  if (config.maxUptimeMs > 0 && Date.now() - START_AT > config.maxUptimeMs) {
+    log.info(`Uptime over ${config.maxUptimeMs}ms — exiting for a fresh container (preempt resource leak).`);
+    process.exit(1);
   }
 }
 

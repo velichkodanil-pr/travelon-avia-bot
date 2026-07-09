@@ -68,6 +68,12 @@ export const config = {
   // scan exceeding this is skipped so the rest of the cycle still runs.
   cycleTimeoutMs: Number(process.env.CYCLE_TIMEOUT_MS) || 8 * 60 * 1000,
   supplierScanTimeoutMs: Number(process.env.SUPPLIER_SCAN_TIMEOUT_MS) || 2 * 60 * 1000,
+  // Auto-heal a resource-exhausted container: after this many consecutive cycles
+  // that fail because Chromium can't launch, exit so Railway relaunches fresh.
+  browserFailRestartThreshold: num(process.env.BROWSER_FAIL_RESTART_THRESHOLD, 2),
+  // Proactively restart after this uptime to preempt the multi-day Chromium/
+  // thread leak that eventually breaks browser launch (0 = disable).
+  maxUptimeMs: num(process.env.MAX_UPTIME_MS, 18 * 60 * 60 * 1000),
 
   // --- matching: booking date ----------------------------------------------
   // 'today'          -> only requests whose booking (request) date is today.
