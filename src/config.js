@@ -46,6 +46,7 @@ export const config = {
   // AVIA_SUPPLIER_IDS (comma-separated, same order) if matching ever fails.
   supplierNames: list(process.env.AVIA_SUPPLIERS, [
     'DRCT',
+    'DRCT Euro Ryanair',
     'Tickets.ua',
     'Fly One Avia',
     'Skyup',

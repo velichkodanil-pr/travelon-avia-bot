@@ -47,6 +47,20 @@ export function supplierLabelMatches(name, label) {
   return l.includes(n);
 }
 
+// Pick the dropdown option for a supplier NAME. An EXACT label match wins so
+// similar names (e.g. "DRCT" 5848 vs "DRCT Euro Ryanair" 6921) can never
+// resolve to each other's partner id; otherwise fall back to the loose
+// matcher. Returns null when nothing matches. Exported for testing.
+export function pickSupplierOption(name, opts) {
+  const n = String(name).trim().toLowerCase();
+  const list = opts || [];
+  return (
+    list.find((o) => String((o && o.label) || '').trim().toLowerCase() === n) ||
+    list.find((o) => supplierLabelMatches(name, o && o.label)) ||
+    null
+  );
+}
+
 // Pegasus: replace the single " _ " placeholder ("штраф в розмірі _ євро")
 // with the booking's Transport Net amount, decimal-comma formatted
 // (810.43 -> 810,43). Returns { message, replaced }. Pure + unit-tested.
@@ -239,7 +253,7 @@ export class AviaClient {
     }
     const opts = await this.readPartnerOptions();
     return names.map((name) => {
-      const hit = opts.find((o) => supplierLabelMatches(name, o.label));
+      const hit = pickSupplierOption(name, opts);
       return { name, id: hit ? hit.value : null, label: hit ? hit.label : null };
     });
   }

@@ -5,6 +5,7 @@ import {
   buildSupplierRe,
   supplierLabelMatches,
   applyTransportNet,
+  pickSupplierOption,
 } from '../src/travelon.js';
 import { config, ALREADY_SENT_PATTERNS } from '../src/config.js';
 import { tallySentByDay, topSentDays } from '../src/report.js';
@@ -52,6 +53,7 @@ test('buildSupplierRe is case-insensitive and loose', () => {
 test('config defaults are the AVIA criteria', () => {
   assert.deepEqual(config.supplierNames, [
     'DRCT',
+    'DRCT Euro Ryanair',
     'Tickets.ua',
     'Fly One Avia',
     'Skyup',
@@ -178,4 +180,27 @@ test('topSentDays sorts newest date first and caps to the limit', () => {
     ['2026-06-21', 5],
     ['2026-06-20', 3],
   ]);
+});
+
+test('pickSupplierOption prefers an exact label match (DRCT vs DRCT Euro Ryanair)', () => {
+  // Real dropdown ids: DRCT=5848, DRCT Euro Ryanair=6921. The loose regex /DRCT/i
+  // matches BOTH, so an exact label match must win — even if the longer name is
+  // listed first — otherwise the two suppliers swap partner ids.
+  const opts = [
+    { value: '6921', label: 'DRCT Euro Ryanair' },
+    { value: '5848', label: 'DRCT' },
+  ];
+  assert.equal(pickSupplierOption('DRCT', opts).value, '5848');
+  assert.equal(pickSupplierOption('DRCT Euro Ryanair', opts).value, '6921');
+  // Loose fallback still works for names that differ from the label wording.
+  const loose = [{ value: '5850', label: 'FLY ONE AVIA LLC' }];
+  assert.equal(pickSupplierOption('Fly One Avia', loose).value, '5850');
+  // Unknown supplier -> null (caller logs "not found in dropdown").
+  assert.equal(pickSupplierOption('Nope Airlines', opts), null);
+  assert.equal(pickSupplierOption('DRCT', []), null);
+});
+
+test('DRCT Euro Ryanair uses the REGULAR profile (not Pegasus)', () => {
+  assert.ok(config.supplierNames.includes('DRCT Euro Ryanair'));
+  assert.ok(!config.pegasusSuppliers.includes('DRCT Euro Ryanair'));
 });
