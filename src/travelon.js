@@ -47,6 +47,26 @@ export function supplierLabelMatches(name, label) {
   return l.includes(n);
 }
 
+// Build a case-insensitive regex for an excluded HOTEL name. Whitespace and
+// "&" are flexible ("Work&Travelon" == "Work & Travelon") and the match is
+// word-bounded so "ON TRIP" never fires on "ON TRIPLE ROOM". For testing.
+export function buildHotelExcludeRe(name) {
+  const core = escapeRe(String(name).trim())
+    .replace(/\s+/g, '\\s+')
+    .replace(/&/g, '\\s*&\\s*');
+  return new RegExp('\\b' + core + '\\b', 'i');
+}
+
+// Return the first configured hotel name found in `text`, else null. Used as a
+// hard "do not send" gate, so it is matched against the whole request row.
+export function matchedExcludedHotel(text, names) {
+  const t = String(text || '');
+  for (const n of names || []) {
+    if (n && buildHotelExcludeRe(n).test(t)) return n;
+  }
+  return null;
+}
+
 // Pick the dropdown option for a supplier NAME. An EXACT label match wins so
 // similar names (e.g. "DRCT" 5848 vs "DRCT Euro Ryanair" 6921) can never
 // resolve to each other's partner id; otherwise fall back to the loose

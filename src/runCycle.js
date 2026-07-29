@@ -1,7 +1,7 @@
 // One full AVIA pass: login -> per supplier filter+scan today's requests ->
 // per request: dedup -> open chat -> choose Авіа + subject -> verify auto-fill
 // -> send (unless dry-run) -> report.
-import { AviaClient, todayISOInTz, ddmmyyyyToISO } from './travelon.js';
+import { AviaClient, todayISOInTz, ddmmyyyyToISO, matchedExcludedHotel } from './travelon.js';
 import { config } from './config.js';
 import { log } from './logger.js';
 import { wasSent, markSent } from './store.js';
@@ -32,6 +32,13 @@ function parseRow(row, supplierName, today) {
   const flat = row.text || '';
   const idM = flat.match(/\b(\d{5})\b/);
   if (!idM) return null;
+  // Hard exclusion by hotel name (e.g. Work&Travelon / ON TRIP) — these must
+  // never receive the regular-flight message.
+  const badHotel = matchedExcludedHotel(flat, config.hotelExcludes);
+  if (badHotel) {
+    log.info(`Skip ${idM[1]}: hotel excluded ("${badHotel}").`);
+    return null;
+  }
   const status = (row.status || '').trim();
   const sl = status.toLowerCase();
   // Skip excluded statuses (Canceled) — substring match for spelling safety.

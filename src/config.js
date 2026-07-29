@@ -55,6 +55,11 @@ export const config = {
   ]),
   supplierIdsOverride: list(process.env.AVIA_SUPPLIER_IDS, []),
 
+  // Hotel names that must NEVER get the regular-flight message. Matched
+  // case-insensitively and word-bounded against the request row (which carries
+  // the hotel name), so "ON TRIP" does NOT match "ON TRIPLE ROOM".
+  hotelExcludes: list(process.env.AVIA_HOTEL_EXCLUDES, ['Work&Travelon', 'ON TRIP']),
+
   // --- matching: statuses --------------------------------------------------
   // Status labels exactly as they appear in the Status filter / row text.
   // Optional status ALLOW-list. Empty (default) = process EVERY status except

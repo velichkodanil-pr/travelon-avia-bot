@@ -6,6 +6,8 @@ import {
   supplierLabelMatches,
   applyTransportNet,
   pickSupplierOption,
+  matchedExcludedHotel,
+  buildHotelExcludeRe,
 } from '../src/travelon.js';
 import { config, ALREADY_SENT_PATTERNS } from '../src/config.js';
 import { tallySentByDay, topSentDays } from '../src/report.js';
@@ -203,4 +205,30 @@ test('pickSupplierOption prefers an exact label match (DRCT vs DRCT Euro Ryanair
 test('DRCT Euro Ryanair uses the REGULAR profile (not Pegasus)', () => {
   assert.ok(config.supplierNames.includes('DRCT Euro Ryanair'));
   assert.ok(!config.pegasusSuppliers.includes('DRCT Euro Ryanair'));
+});
+
+test('excluded hotels block the message (Work&Travelon / ON TRIP)', () => {
+  const ex = config.hotelExcludes;
+  assert.deepEqual(ex, ['Work&Travelon', 'ON TRIP']);
+  // Real row text carries the hotel name, so match against the whole row.
+  const row1 = '1 65477 Hotel: Kalanit Transport: JETIT 29.07.2026 IVANOV WORK&TRAVELON PROGRAM 2adl';
+  const row2 = '2 65478 Hotel: X Transport: DRCT 29.07.2026 PETROV ON TRIP HOSTEL 1adl';
+  assert.equal(matchedExcludedHotel(row1, ex), 'Work&Travelon');
+  assert.equal(matchedExcludedHotel(row2, ex), 'ON TRIP');
+  // Spacing around "&" is flexible.
+  assert.equal(matchedExcludedHotel('WORK & TRAVELON APARTMENTS', ex), 'Work&Travelon');
+  // A normal booking is NOT excluded.
+  assert.equal(matchedExcludedHotel('GYPSOPHILA CLUB MARINE ULTRA ALL INCLUSIVE 4adl', ex), null);
+  assert.equal(matchedExcludedHotel('', ex), null);
+});
+
+test('ON TRIP must NOT match "ON TRIPLE ROOM" (word boundary)', () => {
+  const ex = config.hotelExcludes;
+  // This is the whole point of the word-bounded regex: room descriptions like
+  // "EXTRA BED ON TRIPLE ROOM" must still be messaged normally.
+  assert.equal(matchedExcludedHotel('SUNRISE RESORT EXTRA BED ON TRIPLE ROOM 3adl', ex), null);
+  assert.equal(buildHotelExcludeRe('ON TRIP').test('ON TRIPLE'), false);
+  assert.equal(buildHotelExcludeRe('ON TRIP').test('ON TRIP HOTEL'), true);
+  // Not tripped by an unrelated word containing the letters.
+  assert.equal(buildHotelExcludeRe('ON TRIP').test('MONTRIP'), false);
 });
