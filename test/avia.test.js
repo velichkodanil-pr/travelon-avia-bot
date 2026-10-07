@@ -9,9 +9,13 @@ import {
   matchedExcludedHotel,
   buildHotelExcludeRe,
   pickTransportAmount,
+  pickStatusIds,
+  isCancelledStatus,
+  splitRowStatus,
 } from '../src/travelon.js';
 import { config, ALREADY_SENT_PATTERNS } from '../src/config.js';
 import { tallySentByDay, topSentDays } from '../src/report.js';
+import { parseRow } from '../src/runCycle.js';
 
 // The real auto-filled message text (per the operator's spec).
 const AUTOFILL_SAMPLE =
@@ -66,6 +70,8 @@ test('config defaults are the AVIA criteria', () => {
   // Empty allow-list = process every status; Canceled is excluded.
   assert.deepEqual(config.targetStatuses, []);
   assert.deepEqual(config.excludeStatuses, ['Canceled', 'Cancelled']);
+  // Server-side list filter never requests id 5 = Анульовано.
+  assert.deepEqual(config.excludeStatusIds, ['5']);
   // Regular sends from "Авіа"; Pegasus (JETIT) sends from "Бронювання".
   assert.equal(config.message.regular.department, 'Авіа');
   assert.equal(config.message.pegasus.department, 'Бронювання');
@@ -271,4 +277,86 @@ test('pickTransportAmount: EN labels, Transfer never confused, missing/zero -> e
   assert.equal(pickTransportAmount([{ label: 'Транспорт', agency_cost: '' }]), '');
   assert.equal(pickTransportAmount([]), '');
   assert.equal(pickTransportAmount(undefined), '');
+});
+
+// Live travelon.to status filter options (UK UI, checked 07.10.2026).
+const STATUS_OPTS_UK = [
+  { value: '6', label: 'Нове бронювання' },
+  { value: '1', label: 'В роботі' },
+  { value: '2', label: 'Підтверджено' },
+  { value: '3', label: 'Підтверджено друк документів' },
+  { value: '4', label: 'Не підтверджено' },
+  { value: '5', label: 'Анульовано' },
+  { value: '7', label: 'Не підтверджено з сайту' },
+];
+
+test('status filter requests every status EXCEPT Анульовано (id 5)', () => {
+  const r = pickStatusIds(STATUS_OPTS_UK, {
+    allow: config.targetStatuses,
+    exclude: config.excludeStatuses,
+    excludeIds: config.excludeStatusIds,
+  });
+  assert.deepEqual(r.ids, ['6', '1', '2', '3', '4', '7']);
+  assert.deepEqual(r.dropped, ['Анульовано=5']);
+});
+
+test('cancelled is dropped by label in any UI language, and by explicit id', () => {
+  const en = [
+    { value: '', label: 'All' }, // placeholder without a value is ignored
+    { value: '6', label: 'New booking' },
+    { value: '2', label: 'Confirmed' },
+    { value: '9', label: 'Canceled' },
+  ];
+  assert.deepEqual(pickStatusIds(en).ids, ['6', '2']);
+  const ru = [
+    { value: '2', label: 'Подтверждено' },
+    { value: '5', label: 'Аннулировано' },
+  ];
+  assert.deepEqual(pickStatusIds(ru).ids, ['2']);
+  const renamed = [
+    { value: '5', label: 'Xyz' },
+    { value: '1', label: 'В роботі' },
+  ];
+  assert.deepEqual(pickStatusIds(renamed, { excludeIds: ['5'] }).ids, ['1']);
+  // Nothing usable -> empty ids (runCycle then refuses to scan unfiltered).
+  assert.deepEqual(pickStatusIds([], { excludeIds: ['5'] }).ids, []);
+});
+
+test('allow-list resolves exact-first and can never re-enable cancelled', () => {
+  const r = pickStatusIds(STATUS_OPTS_UK, { allow: ['Підтверджено', 'Анульовано'], excludeIds: ['5'] });
+  assert.deepEqual(r.ids, ['2']); // exact "Підтверджено", not "Не підтверджено"
+  assert.deepEqual(r.missing, ['Анульовано']);
+});
+
+test('isCancelledStatus: cancelled labels only (UK/EN/RU)', () => {
+  for (const s of ['Анульовано', 'Canceled', 'Cancelled', 'Скасовано', 'Аннулировано', 'Отменено']) {
+    assert.equal(isCancelledStatus(s), true, s);
+  }
+  for (const s of STATUS_OPTS_UK.filter((o) => o.value !== '5').map((o) => o.label).concat(['', null])) {
+    assert.equal(isCancelledStatus(s), false, String(s));
+  }
+  assert.equal(isCancelledStatus('Custom stop', ['custom']), true);
+});
+
+test('splitRowStatus reads the booking status before the room-status marker', () => {
+  assert.equal(splitRowStatus('Нове бронювання Статус кімнати : New'), 'Нове бронювання');
+  assert.equal(splitRowStatus('Анульовано\nСтатус кімнати : Cancelled'), 'Анульовано');
+  assert.equal(splitRowStatus('Confirmed Room status : OK'), 'Confirmed');
+  assert.equal(splitRowStatus('no marker'), '');
+});
+
+test('parseRow never returns a cancelled booking (row-level guard)', () => {
+  const today = '2026-10-07';
+  const row = (status) => ({
+    text: '72585 Hotel X 07.10.2026 12:00:00 ' + status,
+    status,
+    bookingDate: '07.10.2026 12:00:00',
+  });
+  assert.equal(parseRow(row('Анульовано'), 'DRCT', today), null);
+  assert.equal(parseRow(row('Canceled'), 'DRCT', today), null);
+  const ok = parseRow(row('Нове бронювання'), 'DRCT', today);
+  assert.equal(ok && ok.id, '72585');
+  assert.equal(ok.status, 'Нове бронювання');
+  // Status unknown (marker missing) -> the server-side filter is the guard.
+  assert.equal(parseRow({ ...row(''), status: null }, 'DRCT', today).id, '72585');
 });

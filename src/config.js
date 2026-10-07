@@ -66,8 +66,13 @@ export const config = {
   // those in excludeStatuses (user wants "any status except Canceled").
   targetStatuses: list(process.env.AVIA_STATUSES, []),
   // Statuses to skip, matched as a case-insensitive SUBSTRING of the row status.
-  // Real TravelON label is "Canceled" (one L); "Cancelled" kept for safety.
+  // EN UI label is "Canceled" (one L), UK UI "Анульовано". Cancelled-like labels
+  // in any UI language are ALWAYS skipped anyway (CANCEL_STATUS_RE, travelon.js).
   excludeStatuses: list(process.env.AVIA_EXCLUDE_STATUSES, ['Canceled', 'Cancelled']),
+  // Status-filter option VALUES that are never requested (server-side list
+  // filter): 5 = "Анульовано"/Canceled on travelon.to. The list is requested with
+  // every OTHER status selected, so cancelled bookings never reach the bot.
+  excludeStatusIds: list(process.env.AVIA_EXCLUDE_STATUS_IDS, ['5']),
   // Safety watchdog timeouts (ms). cycleTimeoutMs: a whole cycle exceeding this
   // makes the process exit so Railway relaunches with a fresh browser (a hung
   // page can never freeze the bot forever). supplierScanTimeoutMs: one supplier

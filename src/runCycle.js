@@ -1,7 +1,13 @@
 // One full AVIA pass: login -> per supplier filter+scan today's requests ->
 // per request: dedup -> open chat -> choose Авіа + subject -> verify auto-fill
 // -> send (unless dry-run) -> report.
-import { AviaClient, todayISOInTz, ddmmyyyyToISO, matchedExcludedHotel } from './travelon.js';
+import {
+  AviaClient,
+  todayISOInTz,
+  ddmmyyyyToISO,
+  matchedExcludedHotel,
+  isCancelledStatus,
+} from './travelon.js';
 import { config } from './config.js';
 import { log } from './logger.js';
 import { wasSent, markSent } from './store.js';
@@ -26,9 +32,9 @@ function matchesBookingDate(iso, today) {
   return config.bookingDateMode === 'today_or_later' ? iso >= today : iso === today;
 }
 
-// Keep a row only if: it has a 5-digit id, its status is one of the targets,
-// and its booking (request) date matches today (per AVIA_BOOKING_DATE).
-function parseRow(row, supplierName, today) {
+// Keep a row only if: it has a 5-digit id, it is NOT cancelled, its status is
+// one of the targets, and its booking (request) date matches today.
+export function parseRow(row, supplierName, today) {
   const flat = row.text || '';
   const idM = flat.match(/\b(\d{5})\b/);
   if (!idM) return null;
@@ -41,8 +47,14 @@ function parseRow(row, supplierName, today) {
   }
   const status = (row.status || '').trim();
   const sl = status.toLowerCase();
-  // Skip excluded statuses (Canceled) — substring match for spelling safety.
-  if (config.excludeStatuses.some((s) => s && sl.includes(s.toLowerCase()))) return null;
+  // Never message a cancelled booking (Анульовано / Canceled / ...). The list is
+  // already requested WITHOUT cancelled status ids; this is the second guard.
+  if (isCancelledStatus(status, config.excludeStatuses)) {
+    if (matchesBookingDate(ddmmyyyyToISO(row.bookingDate), today)) {
+      log.info(`Skip ${idM[1]}: cancelled ("${status}").`);
+    }
+    return null;
+  }
   // Empty allow-list = accept every (non-excluded) status.
   const okStatus =
     config.targetStatuses.length === 0 ||
@@ -86,11 +98,29 @@ export async function runCycle() {
     await client.openRequests();
     const today = todayISOInTz(config.tz);
 
-    // Resolve supplier names -> partner IDs and status labels -> status IDs.
+    // Resolve supplier names -> partner IDs and the status filter: every status
+    // EXCEPT cancelled (Анульовано = id 5), so cancelled bookings never come back.
     const suppliers = await client.resolveSupplierIds(config.supplierNames);
-    const statusIds = await client.resolveStatusIds(config.targetStatuses);
+    const st = await client.resolveScanStatusIds({
+      allow: config.targetStatuses,
+      exclude: config.excludeStatuses,
+      excludeIds: config.excludeStatusIds,
+    });
+    // Fail-safe: an EMPTY status filter makes Travelon return every status,
+    // cancelled included — never scan unfiltered.
+    if (!st.ids.length) {
+      throw new Error(
+        `status filter: no status ids resolved (${st.total} options) — refusing to scan unfiltered`
+      );
+    }
+    if (!st.dropped.length) {
+      log.warn('Status filter: no cancelled status found in the dropdown — check AVIA_EXCLUDE_STATUS_IDS.');
+    }
+    const statusIds = st.ids;
     log.info('Suppliers: ' + suppliers.map((s) => `${s.name}=${s.id ?? 'NOT FOUND'}`).join(', '));
-    log.info(`Status IDs: ${statusIds.join(',') || DASH} | today=${today} (${config.bookingDateMode})`);
+    log.info(
+      `Status IDs: ${statusIds.join(',')} (excluded: ${st.dropped.join(', ') || DASH}) | today=${today} (${config.bookingDateMode})`
+    );
 
     // Scan each supplier's list, keeping today's matching requests (dedup by id).
     const seen = new Set();

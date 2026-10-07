@@ -87,7 +87,7 @@ async function main() {
     ` statuses  : ${
       config.targetStatuses.length
         ? config.targetStatuses.join(', ')
-        : 'ALL except ' + config.excludeStatuses.join('/')
+        : `ALL except cancelled (ids ${config.excludeStatusIds.join(',')}; ${config.excludeStatuses.join('/')}/Анульовано)`
     }`
   );
   log.info(` watchdog  : cycle ${config.cycleTimeoutMs}ms | supplier ${config.supplierScanTimeoutMs}ms`);

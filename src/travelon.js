@@ -67,6 +67,66 @@ export function matchedExcludedHotel(text, names) {
   return null;
 }
 
+// --- booking status --------------------------------------------------------
+// A cancelled booking must NEVER get a message. Labels differ per UI language:
+// EN "Canceled"/"Cancelled", UK "Анульовано"/"Скасовано", RU "Аннулировано"/
+// "Отменено". For testing.
+export const CANCEL_STATUS_RE = /cancel|анульов|аннул|скасов|отмен|відмін/i;
+
+// True if a status label means "cancelled" — by CANCEL_STATUS_RE or by any
+// configured substring (config.excludeStatuses). Empty status -> false.
+export function isCancelledStatus(status, extra = []) {
+  const s = String(status || '').replace(/\s+/g, ' ').trim();
+  if (!s) return false;
+  if (CANCEL_STATUS_RE.test(s)) return true;
+  const sl = s.toLowerCase();
+  return (extra || []).some((x) => x && sl.includes(String(x).toLowerCase()));
+}
+
+// In the requests list the booking status is followed by the room status:
+// "Нове бронювання Статус кімнати : New" (UK UI) / "Confirmed Room status : OK"
+// (EN UI). The text BEFORE this marker is the booking status.
+export const ROW_STATUS_MARKER_RE = /Room status|Статус кімнати|Статус номера/i;
+
+// Status-cell text -> booking status ('' when the marker is absent). For testing.
+export function splitRowStatus(cellText) {
+  const t = String(cellText || '');
+  if (!ROW_STATUS_MARKER_RE.test(t)) return '';
+  return t.split(ROW_STATUS_MARKER_RE)[0].replace(/\s+/g, ' ').trim();
+}
+
+// Status-filter options [{ value, label }] -> ids for the SERVER-SIDE list
+// filter. Cancelled is ALWAYS dropped: by id (`excludeIds`, "5" = Анульовано),
+// by label (CANCEL_STATUS_RE) or by an `exclude` substring. Empty `allow` =
+// every remaining status; otherwise each allow label resolves exact-first, then
+// by substring. Returns { ids, dropped: ["label=id"], missing: [allow labels] }.
+// For testing.
+export function pickStatusIds(options, { allow = [], exclude = [], excludeIds = [] } = {}) {
+  const exIds = (excludeIds || []).map((x) => String(x).trim()).filter(Boolean);
+  const opts = (options || [])
+    .map((o) => ({
+      value: String((o && o.value) || '').trim(),
+      label: String((o && o.label) || '').replace(/\s+/g, ' ').trim(),
+    }))
+    .filter((o) => o.value);
+  const isOut = (o) => exIds.includes(o.value) || isCancelledStatus(o.label, exclude);
+  const dropped = opts.filter(isOut).map((o) => `${o.label || '?'}=${o.value}`);
+  const kept = opts.filter((o) => !isOut(o));
+  if (!(allow || []).length) return { ids: kept.map((o) => o.value), dropped, missing: [] };
+  const ids = [];
+  const missing = [];
+  for (const label of allow) {
+    const l = String(label).toLowerCase();
+    const hit =
+      kept.find((o) => o.label.toLowerCase() === l) ||
+      kept.find((o) => o.label.toLowerCase().includes(l));
+    if (hit) {
+      if (!ids.includes(hit.value)) ids.push(hit.value);
+    } else missing.push(label);
+  }
+  return { ids, dropped, missing };
+}
+
 // "Prices by modules" rows -> the TRANSPORT row's amount in column `field`.
 // Rows look like { label, gross_cost, operator_cost, agency_cost, client_cost }.
 // NB Travelon naming: `gross_cost` is the NET column (нетто); BRUTTO ("Сума
@@ -295,23 +355,25 @@ export class AviaClient {
     });
   }
 
-  // Map status LABELS to status IDs from filter[status_ids][] options.
-  async resolveStatusIds(labels) {
-    const opts = await this.page
-      .locator(`${sel.requests.statusSelect} option`)
-      .evaluateAll((os) =>
-        os.map((o) => ({ value: o.value, label: (o.textContent || '').replace(/\s+/g, ' ').trim() }))
-      )
-      .catch(() => []);
-    const ids = [];
-    for (const label of labels) {
-      const hit =
-        opts.find((o) => o.label.toLowerCase() === label.toLowerCase()) ||
-        opts.find((o) => o.label.toLowerCase().includes(label.toLowerCase()));
-      if (hit) ids.push(hit.value);
-      else log.warn(`Status label not found in dropdown: "${label}"`);
-    }
-    return ids;
+  // filter[status_ids][] options -> [{ value, label }].
+  async readStatusOptions() {
+    return (
+      (await this.page
+        .locator(`${sel.requests.statusSelect} option`)
+        .evaluateAll((os) =>
+          os.map((o) => ({ value: o.value, label: (o.textContent || '').replace(/\s+/g, ' ').trim() }))
+        )
+        .catch(() => [])) || []
+    );
+  }
+
+  // Status ids to scan = every status (or the allow-list) EXCEPT cancelled, so
+  // Travelon never even returns cancelled bookings (see pickStatusIds).
+  async resolveScanStatusIds({ allow = [], exclude = [], excludeIds = [] } = {}) {
+    const opts = await this.readStatusOptions();
+    const res = pickStatusIds(opts, { allow, exclude, excludeIds });
+    for (const m of res.missing) log.warn(`Status label not found in dropdown: "${m}"`);
+    return { ...res, total: opts.length };
   }
 
   // Apply the list filter for ONE supplier: set partner_id + status_ids, CLEAR
@@ -355,25 +417,28 @@ export class AviaClient {
   }
 
   // Read each result row: flat text, status label, and booking (request) date.
+  // Status = text before the room-status marker ("Room status" in the EN UI,
+  // "Статус кімнати" in the UK UI) — the innermost cell holding the marker.
   async scanRows() {
     return await this.page
       .locator(sel.requests.resultRows)
-      .evaluateAll((trs) =>
-        trs.map((tr) => {
-          const norm = (x) => (x || '').replace(/\s+/g, ' ').trim();
-          const text = norm(tr.innerText);
-          const statusCell = Array.from(tr.querySelectorAll('td')).find((td) =>
-            /Room status/i.test(td.innerText)
-          );
-          const status = statusCell
-            ? statusCell.innerText.split(/Room status/i)[0].replace(/\s+/g, ' ').trim()
-            : null;
-          const cells = Array.from(tr.children);
-          // "Date of request" (booking date) is column index 6 (direct cells).
-          const bm = cells[6] ? norm(cells[6].innerText).match(/\d{2}\.\d{2}\.\d{4}/) : null;
-          const bookingDate = bm ? bm[0] : '';
-          return { text, status, bookingDate };
-        })
+      .evaluateAll(
+        (trs, markerSrc) => {
+          const marker = new RegExp(markerSrc, 'i');
+          return trs.map((tr) => {
+            const norm = (x) => (x || '').replace(/\s+/g, ' ').trim();
+            const text = norm(tr.innerText);
+            const hits = Array.from(tr.querySelectorAll('td')).filter((td) => marker.test(td.innerText));
+            const statusCell = hits.length ? hits[hits.length - 1] : null;
+            const status = statusCell ? norm(statusCell.innerText.split(marker)[0]) : null;
+            const cells = Array.from(tr.children);
+            // "Date of request" (booking date) is column index 6 (direct cells).
+            const bm = cells[6] ? norm(cells[6].innerText).match(/\d{2}\.\d{2}\.\d{4}/) : null;
+            const bookingDate = bm ? bm[0] : '';
+            return { text, status, bookingDate };
+          });
+        },
+        ROW_STATUS_MARKER_RE.source
       )
       .catch(() => []);
   }
