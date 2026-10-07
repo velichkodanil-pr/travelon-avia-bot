@@ -12,10 +12,11 @@ import {
   pickStatusIds,
   isCancelledStatus,
   splitRowStatus,
+  filterApplied,
 } from '../src/travelon.js';
 import { config, ALREADY_SENT_PATTERNS } from '../src/config.js';
-import { tallySentByDay, topSentDays } from '../src/report.js';
-import { parseRow } from '../src/runCycle.js';
+import { tallySentByDay, topSentDays, keepExistingRow } from '../src/report.js';
+import { parseRow, needNextPage } from '../src/runCycle.js';
 
 // The real auto-filled message text (per the operator's spec).
 const AUTOFILL_SAMPLE =
@@ -359,4 +360,53 @@ test('parseRow never returns a cancelled booking (row-level guard)', () => {
   assert.equal(ok.status, 'Нове бронювання');
   // Status unknown (marker missing) -> the server-side filter is the guard.
   assert.equal(parseRow({ ...row(''), status: null }, 'DRCT', today).id, '72585');
+});
+
+test('filterApplied: the re-rendered form must show exactly our partner + statuses', () => {
+  const ids = ['6', '1', '2', '3', '4', '7'];
+  assert.equal(filterApplied({ partner: '1254', statuses: ['6', '1', '2', '3', '4', '7'] }, '1254', ids), true);
+  assert.equal(filterApplied({ partner: '1254', statuses: ['7', '6', '4', '3', '2', '1'] }, 1254, ids), true); // order-free
+  assert.equal(filterApplied({ partner: '6826', statuses: ids }, '1254', ids), false); // other supplier
+  assert.equal(filterApplied({ partner: '1254', statuses: [] }, '1254', ids), false); // statuses not applied
+  assert.equal(filterApplied({ partner: '1254', statuses: ['5', ...ids] }, '1254', ids), false); // cancelled crept in
+  assert.equal(filterApplied({ partner: '', statuses: ids }, '1254', ids), false);
+  assert.equal(filterApplied({ partner: null, statuses: null }, '1254', ids), false); // form missing
+  assert.equal(filterApplied(null, '1254', ids), false);
+  // Still the OLD page (submit did not navigate): its form shows our own edits.
+  assert.equal(filterApplied({ stale: true, partner: '1254', statuses: ids }, '1254', ids), false);
+});
+
+test('needNextPage: only while the page still ENDS with today (date-desc list)', () => {
+  const today = '2026-10-07';
+  const r = (d) => ({ text: '72585 x', status: 'В роботі', bookingDate: d });
+  const totals = { text: '116 60026.33 13023.89', status: null, bookingDate: '' }; // per-page totals row
+  // whole page is today -> the next page may hold more of today
+  assert.equal(needNextPage([r('07.10.2026 12:00:00'), r('07.10.2026 09:00:00'), totals], today), true);
+  // page already reaches yesterday -> nothing of today on the next page
+  assert.equal(needNextPage([r('07.10.2026 12:00:00'), r('06.10.2026 23:59:00'), totals], today), false);
+  assert.equal(needNextPage([r('05.10.2026 10:00:00')], today), false);
+  assert.equal(needNextPage([totals], today), false);
+  assert.equal(needNextPage([], today), false);
+});
+
+test('keepExistingRow: re-check rows never overwrite a "так" row', () => {
+  assert.equal(keepExistingRow({ keep: true }, 'так'), true);
+  assert.equal(keepExistingRow({ keep: true }, ' Так '), true);
+  // a failed/unsent row IS updated (e.g. later found already in chat)
+  assert.equal(keepExistingRow({ keep: true }, 'ні'), false);
+  assert.equal(keepExistingRow({ keep: true }, ''), false);
+  assert.equal(keepExistingRow({ keep: true }, undefined), false);
+  // real results (Надіслано / Помилка / ...) always write
+  assert.equal(keepExistingRow({}, 'так'), false);
+  assert.equal(keepExistingRow({ keep: false }, 'так'), false);
+});
+
+test('parseRow: older rows (hotel-excluded or not) are never candidates', () => {
+  const today = '2026-10-07';
+  const old = { text: '70931 Work&Travelon 05.10.2026', status: 'В роботі', bookingDate: '05.10.2026 10:00:00' };
+  assert.equal(parseRow(old, 'Fly One Avia', today), null);
+  const oldOk = { text: '70930 Hotel 05.10.2026', status: 'В роботі', bookingDate: '05.10.2026 10:00:00' };
+  assert.equal(parseRow(oldOk, 'Fly One Avia', today), null);
+  const todayExcluded = { text: '72590 ON TRIP 07.10.2026', status: 'В роботі', bookingDate: '07.10.2026 10:00:00' };
+  assert.equal(parseRow(todayExcluded, 'DRCT', today), null);
 });

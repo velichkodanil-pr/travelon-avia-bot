@@ -33,16 +33,19 @@ function matchesBookingDate(iso, today) {
 }
 
 // Keep a row only if: it has a 5-digit id, it is NOT cancelled, its status is
-// one of the targets, and its booking (request) date matches today.
+// one of the targets, and its booking (request) date matches today. Skips are
+// logged only for TODAY's rows (older rows on the page are just noise).
 export function parseRow(row, supplierName, today) {
   const flat = row.text || '';
   const idM = flat.match(/\b(\d{5})\b/);
   if (!idM) return null;
+  const iso = ddmmyyyyToISO(row.bookingDate);
+  const isToday = matchesBookingDate(iso, today);
   // Hard exclusion by hotel name (e.g. Work&Travelon / ON TRIP) — these must
   // never receive the regular-flight message.
   const badHotel = matchedExcludedHotel(flat, config.hotelExcludes);
   if (badHotel) {
-    log.info(`Skip ${idM[1]}: hotel excluded ("${badHotel}").`);
+    if (isToday) log.info(`Skip ${idM[1]}: hotel excluded ("${badHotel}").`);
     return null;
   }
   const status = (row.status || '').trim();
@@ -50,9 +53,7 @@ export function parseRow(row, supplierName, today) {
   // Never message a cancelled booking (Анульовано / Canceled / ...). The list is
   // already requested WITHOUT cancelled status ids; this is the second guard.
   if (isCancelledStatus(status, config.excludeStatuses)) {
-    if (matchesBookingDate(ddmmyyyyToISO(row.bookingDate), today)) {
-      log.info(`Skip ${idM[1]}: cancelled ("${status}").`);
-    }
+    if (isToday) log.info(`Skip ${idM[1]}: cancelled ("${status}").`);
     return null;
   }
   // Empty allow-list = accept every (non-excluded) status.
@@ -60,9 +61,21 @@ export function parseRow(row, supplierName, today) {
     config.targetStatuses.length === 0 ||
     config.targetStatuses.some((s) => s.toLowerCase() === sl);
   if (!okStatus) return null;
-  const iso = ddmmyyyyToISO(row.bookingDate);
-  if (!matchesBookingDate(iso, today)) return null;
+  if (!isToday) return null;
   return { id: idM[1], supplier: supplierName, status, bookingDateISO: iso };
+}
+
+// The list is sorted newest-first (verified live: ids AND request dates descend
+// across pages). The next page can hold today's bookings only if THIS page's
+// last dated row is still today; rows without a date (the per-page totals row)
+// are ignored. For testing.
+export function needNextPage(rows, today) {
+  let last = null;
+  for (const r of rows || []) {
+    const iso = ddmmyyyyToISO(r && r.bookingDate);
+    if (iso) last = iso;
+  }
+  return Boolean(last) && matchesBookingDate(last, today);
 }
 
 const mkRow = (c, o = {}) => ({
@@ -143,20 +156,18 @@ export async function runCycle() {
               if (!ids.length) break;
               if (prevFirstId && ids[0] === prevFirstId) break; // same page repeated -> end
               prevFirstId = ids[0];
-              let todayOnPage = 0;
               for (const r of rows) {
                 const c = parseRow(r, sup.name, today);
                 if (!c) continue;
-                todayOnPage += 1;
                 if (!seen.has(c.id)) {
                   seen.add(c.id);
                   candidates.push(c);
                   supCount += 1;
                 }
               }
-              // List is date-desc: once a page (that had id-rows) yields no today
-              // requests, the rest are older — stop paging this supplier.
-              if (todayOnPage === 0) break;
+              // List is date-desc: open the next page only while this one still
+              // ends with today's bookings (each page is ~2 MB to load).
+              if (!needNextPage(rows, today)) break;
             }
             log.info(`${sup.name}: ${supCount} request(s) today`);
           })(),
@@ -177,7 +188,9 @@ export async function runCycle() {
       try {
         if (await wasSent(c.id)) {
           summary.skippedStore.push(c.id);
-          rowsForReport.push(mkRow(c, { sent: 'так', result: 'Надіслано раніше (журнал)' }));
+          // keep: an existing "так" row is left untouched (original result,
+          // send time and brutto note survive); only missing rows are added.
+          rowsForReport.push(mkRow(c, { sent: 'так', result: 'Надіслано раніше (журнал)', keep: true }));
           log.info(`Skip ${c.id}: already messaged on a previous run.`);
           continue;
         }
@@ -213,7 +226,7 @@ export async function runCycle() {
         if (await client.chatAlreadySent()) {
           summary.skippedAlready.push(c.id);
           if (!config.dryRun) await markSent(c.id, { supplier: c.supplier, reason: 'already-in-chat' });
-          rowsForReport.push(mkRow(c, { sent: 'так', result: 'Вже надіслано у чаті' }));
+          rowsForReport.push(mkRow(c, { sent: 'так', result: 'Вже надіслано у чаті', keep: true }));
           log.info(`Skip ${c.id}: AVIA message already present in chat.`);
           await client.closeChat();
           continue;
@@ -324,7 +337,9 @@ export async function runCycle() {
   if (reportEnabled()) {
     try {
       const res = await upsertRows(rowsForReport);
-      log.info(`Report: Google Sheet — ${res.updated} оновлено, ${res.appended} додано.`);
+      log.info(
+        `Report: Google Sheet — ${res.updated} оновлено, ${res.appended} додано, ${res.kept || 0} без змін.`
+      );
     } catch (e) {
       log.warn('Report update failed (continuing): ' + e.message);
     }

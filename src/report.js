@@ -75,9 +75,17 @@ async function getSheets() {
   return google.sheets({ version: 'v4', auth });
 }
 
-// Upsert рядків по № заявки (стовпець A). Повертає { updated, appended }.
+// A re-check row (row.keep: "Надіслано раніше" / "Вже надіслано у чаті") must
+// not overwrite a row that already says "так" — that row holds the original
+// result, send time and brutto note. Rows still "ні"/empty ARE updated. For
+// testing.
+export function keepExistingRow(row, existingSentCell) {
+  return Boolean(row && row.keep) && String(existingSentCell ?? '').trim().toLowerCase() === 'так';
+}
+
+// Upsert рядків по № заявки (стовпець A). Повертає { updated, appended, kept }.
 export async function upsertRows(rows) {
-  if (!rows || !rows.length) return { updated: 0, appended: 0 };
+  if (!rows || !rows.length) return { updated: 0, appended: 0, kept: 0 };
   const r = config.report;
   const sheets = await getSheets();
   const { title: tab, sheetId } = await hbTabMeta(sheets);
@@ -85,9 +93,11 @@ export async function upsertRows(rows) {
 
   const getRes = await sheets.spreadsheets.values.get({
     spreadsheetId: r.spreadsheetId,
-    range: `${tab}!A1:A100000`,
+    range: `${tab}!A1:E100000`,
   });
-  const colA = (getRes.data.values || []).map((x) => (x[0] ?? '').toString().trim());
+  const vals = getRes.data.values || [];
+  const colA = vals.map((x) => (x[0] ?? '').toString().trim());
+  const colE = vals.map((x) => (x[4] ?? '').toString().trim());
 
   const data = [];
   const headerPresent = colA.length > 0 && colA[0] === HEADER[0];
@@ -103,12 +113,15 @@ export async function upsertRows(rows) {
   const appends = [];
   const willAppend = new Set();
   let updated = 0;
+  let kept = 0;
   for (const row of rows) {
     const id = (row.bookingId ?? '').toString().trim();
     if (!id) continue;
     const values = rowToValues(row, updatedAt);
     const existing = idToRow.get(id);
-    if (existing) {
+    if (existing && keepExistingRow(row, colE[existing - 1])) {
+      kept += 1;
+    } else if (existing) {
       data.push({ range: `${tab}!A${existing}:${LAST_COL}${existing}`, values: [values] });
       updated += 1;
     } else if (!willAppend.has(id)) {
@@ -158,8 +171,8 @@ export async function upsertRows(rows) {
     });
   }
 
-  log.info(`[report] Google Sheet: ${updated} оновлено, ${appends.length} додано.`);
-  return { updated, appended: appends.length };
+  log.info(`[report] Google Sheet: ${updated} оновлено, ${appends.length} додано, ${kept} без змін.`);
+  return { updated, appended: appends.length, kept };
 }
 
 // --- Heartbeat / liveness panel -------------------------------------------

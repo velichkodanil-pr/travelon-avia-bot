@@ -127,6 +127,22 @@ export function pickStatusIds(options, { allow = [], exclude = [], excludeIds = 
   return { ids, dropped, missing };
 }
 
+// Did the server apply our list filter? The list page re-renders its filter
+// form with the ACTIVE filter, so the partner + selected statuses read back
+// from the new page must equal what we submitted. For testing.
+export function filterApplied(applied, partnerId, statusIds = []) {
+  // stale = still the OLD document (submit did not navigate): its form holds our
+  // own unsent edits, so it proves nothing.
+  if (!applied || applied.stale || applied.partner == null) return false;
+  if (String(applied.partner) !== String(partnerId)) return false;
+  const want = (statusIds || []).map(String);
+  if (want.length) {
+    const got = new Set((applied.statuses || []).map(String));
+    if (got.size !== want.length || !want.every((id) => got.has(id))) return false;
+  }
+  return true;
+}
+
 // "Prices by modules" rows -> the TRANSPORT row's amount in column `field`.
 // Rows look like { label, gross_cost, operator_cost, agency_cost, client_cost }.
 // NB Travelon naming: `gross_cost` is the NET column (нетто); BRUTTO ("Сума
@@ -326,7 +342,48 @@ export class AviaClient {
   async openRequests() {
     log.info('Opening requests page…');
     await this.page.goto(config.requestsUrl, { waitUntil: 'domcontentloaded' });
-    await this.page.waitForTimeout(2500); // grid loads via AJAX
+    // The list + filter form are server-rendered (no client-side grid), so
+    // wait for the form itself instead of a fixed pause.
+    await this.page
+      .waitForSelector(sel.requests.partnerSelect, { state: 'attached', timeout: 10000 })
+      .catch(() => {});
+    await this.page.waitForTimeout(300);
+  }
+
+  // Wait until a freshly loaded list page is ready to read. Rows are in the
+  // server HTML (verified: no client-side grid), so this is only a short
+  // safety settle after the document has been parsed.
+  async waitForList() {
+    await this.page
+      .waitForSelector(sel.requests.resultRows, { state: 'attached', timeout: 5000 })
+      .catch(() => {});
+    await this.page.waitForTimeout(300);
+  }
+
+  // True when the current page is the requests list WITH its filter form.
+  async hasFilterForm() {
+    if (!/\/book\/bundle\/index/.test(this.page.url())) return false;
+    return (await this.page.locator(sel.requests.partnerSelect).count().catch(() => 0)) > 0;
+  }
+
+  // The filter the server actually applied, read back from the re-rendered form.
+  async readAppliedFilter() {
+    return (
+      (await this.page
+        .evaluate(() => {
+          const form =
+            document.querySelector('form[action="/book/bundle/index"]') ||
+            document.querySelector('form');
+          const p = form && form.querySelector('select[name="filter[partner_id]"]');
+          const st = form && form.querySelector('select[name="filter[status_ids][]"]');
+          return {
+            stale: Boolean(window.__aviaFilterMark),
+            partner: p ? String(p.value || '') : null,
+            statuses: st ? Array.from(st.options).filter((o) => o.selected).map((o) => o.value) : null,
+          };
+        })
+        .catch(() => null)) || { stale: true, partner: null, statuses: null }
+    );
   }
 
   async readPartnerOptions() {
@@ -378,11 +435,30 @@ export class AviaClient {
 
   // Apply the list filter for ONE supplier: set partner_id + status_ids, CLEAR
   // every date / order range field (booking date is filtered client-side), then
-  // submit and wait for the filtered list. Mirrors the proven transfer-bot
-  // filter so subsequent ?page=N GETs stay filtered.
+  // submit and wait for the filtered list (subsequent ?page=N GETs stay
+  // filtered). The filter form is on every list page, so the list is NOT
+  // reloaded first (that cost an extra ~2 MB page per supplier) — only when the
+  // form is missing. The result is VERIFIED against the re-rendered form; on a
+  // mismatch it retries once from a fresh page, then fails the supplier scan
+  // (never scans a wrong or unfiltered list).
   async applySupplierFilter(partnerId, statusIds) {
-    await this.page.goto(config.requestsUrl, { waitUntil: 'domcontentloaded' });
-    await this.page.waitForTimeout(1200);
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (attempt > 1 || !(await this.hasFilterForm())) {
+        await this.page.goto(config.requestsUrl, { waitUntil: 'domcontentloaded' });
+        await this.page.waitForTimeout(1200);
+      }
+      await this.submitFilter(partnerId, statusIds);
+      const applied = await this.readAppliedFilter();
+      if (filterApplied(applied, partnerId, statusIds)) return;
+      log.warn(
+        `List filter not applied (attempt ${attempt}): partner ${applied.partner ?? '?'} vs ${partnerId}, ` +
+          `statuses ${(applied.statuses || []).join(',') || '?'} vs ${statusIds.join(',')}.`
+      );
+    }
+    throw new Error(`list filter for partner ${partnerId} was not applied`);
+  }
+
+  async submitFilter(partnerId, statusIds) {
     await Promise.all([
       this.page
         .waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 })
@@ -408,12 +484,15 @@ export class AviaClient {
             const n = el.getAttribute('name') || '';
             if (/\[(from|to)_/.test(n) || /date/i.test(n)) el.value = '';
           });
+          // Mark THIS document: a page that still carries the mark after the
+          // submit is the old one (navigation did not happen).
+          window.__aviaFilterMark = 1;
           form.submit();
         },
         { partnerId, statusIds }
       ),
     ]);
-    await this.page.waitForTimeout(2500);
+    await this.waitForList();
   }
 
   // Read each result row: flat text, status label, and booking (request) date.
@@ -447,7 +526,7 @@ export class AviaClient {
     await this.page
       .goto(`${config.requestsUrl}?page=${page}`, { waitUntil: 'domcontentloaded' })
       .catch(() => {});
-    await this.page.waitForTimeout(2000);
+    await this.waitForList();
   }
 
   // --- chat (copied from the working transfer bot) --------------------------
