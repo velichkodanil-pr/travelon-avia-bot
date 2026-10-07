@@ -91,7 +91,7 @@ export const config = {
   //   regular -> subject "Бронювання на регулярному рейсі (ТІКЕТСИ\ДРСТ\СКАЙ АП)"
   //   pegasus -> subject "Бронювання авіаквитків Pegasus" (JETIT): the single
   //              " _ " in the auto-filled text is replaced with the booking's
-  //              Transport Net amount (Prices by modules).
+  //              transport BRUTTO amount (Prices by modules, Agency column).
   message: {
     audience: (process.env.AVIA_AUDIENCE || 'everyone').toLowerCase(),
     regular: {
@@ -118,6 +118,10 @@ export const config = {
       expectedContains:
         process.env.AVIA_PEGASUS_EXPECTED_CONTAINS || 'заброньований на регулярн',
       fillTransportNet: true,
+      // Which "Prices by modules" column of the Транспорт row is the penalty:
+      // agency_cost = БРУТТО (sums to "Сума брутто") — default since Oct 2026;
+      // gross_cost = НЕТТО (Travelon's Net column); operator_cost; client_cost.
+      amountField: process.env.AVIA_PEGASUS_AMOUNT_FIELD || 'agency_cost',
     },
   },
 

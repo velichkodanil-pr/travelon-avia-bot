@@ -67,6 +67,23 @@ export function matchedExcludedHotel(text, names) {
   return null;
 }
 
+// "Prices by modules" rows -> the TRANSPORT row's amount in column `field`.
+// Rows look like { label, gross_cost, operator_cost, agency_cost, client_cost }.
+// NB Travelon naming: `gross_cost` is the NET column (нетто); BRUTTO ("Сума
+// брутто" / Gross amount) is the sum of `agency_cost` — so the transport brutto
+// is the Транспорт row's agency_cost. Label match covers UK/RU/EN UIs and never
+// confuses "Трансфер"/"Transfer" with "Транспорт"/"Transport". A missing or zero
+// value returns '' (caller must not send a blank/zero penalty). For testing.
+export function pickTransportAmount(modules, field = 'agency_cost') {
+  for (const m of modules || []) {
+    const label = String((m && m.label) || '').trim();
+    if (!/транспорт|transport/i.test(label)) continue;
+    const v = String((m && m[field]) || '').trim();
+    if (v && Number(v.replace(',', '.')) > 0) return v;
+  }
+  return '';
+}
+
 // Pick the dropdown option for a supplier NAME. An EXACT label match wins so
 // similar names (e.g. "DRCT" 5848 vs "DRCT Euro Ryanair" 6921) can never
 // resolve to each other's partner id; otherwise fall back to the loose
@@ -467,16 +484,37 @@ export class AviaClient {
     await this.page.waitForTimeout(2000);
   }
 
-  // Transport "Net" from "Prices by modules" (input[name="transport[net_cost]"]).
-  async readTransportNet() {
+  // "Prices by modules" table -> [{ label, gross_cost, operator_cost,
+  // agency_cost, client_cost, ... }], one row per module, values in the bundle
+  // currency. NB: Travelon's `gross_cost` is the NET column.
+  async readModuleSums() {
+    await this.page
+      .waitForSelector('input[name="bundle_module_sum[][agency_cost]"]', { state: 'attached', timeout: 8000 })
+      .catch(() => {});
     return (
       (await this.page
-        .evaluate(() => {
-          const el = document.querySelector('input[name="transport[net_cost]"]');
-          return el ? (el.value || '').trim() : '';
-        })
-        .catch(() => '')) || ''
+        .evaluate(() =>
+          [...document.querySelectorAll('tr')]
+            .filter((tr) => tr.querySelector('input[name^="bundle_module_sum"]'))
+            .map((tr) => {
+              const td = tr.querySelector('td');
+              const row = { label: ((td && td.innerText) || '').replace(/\s+/g, ' ').trim() };
+              tr.querySelectorAll('input[name^="bundle_module_sum"]').forEach((i) => {
+                const k = (i.name.match(/\[([a-z_]+)\]$/) || [])[1];
+                if (k) row[k] = (i.value || '').trim();
+              });
+              return row;
+            })
+        )
+        .catch(() => [])) || []
     );
+  }
+
+  // Pegasus penalty amount: the Транспорт row's `field` (default agency_cost =
+  // BRUTTO). Was transport[net_cost] (NETTO) until Oct 2026 — ops reported the
+  // penalty must be brutto. Returns '' when not found (caller then won't send).
+  async readTransportAmount(field = 'agency_cost') {
+    return pickTransportAmount(await this.readModuleSums(), field);
   }
 
   async verifyAndSendAvia({
@@ -532,7 +570,7 @@ export class AviaClient {
     // (810.43 -> 810,43). Other profiles leave the text untouched.
     const { message, replaced: amtReplaced } = applyTransportNet(filled, transportNet);
     if (transportNet) {
-      if (amtReplaced) log.info(`[avia] ${bundleId}: inserted Transport Net into Pegasus message.`);
+      if (amtReplaced) log.info(`[avia] ${bundleId}: inserted transport brutto into Pegasus message.`);
       else log.warn(`[avia] ${bundleId}: ' _ ' placeholder not found; sending without amount.`);
     }
 

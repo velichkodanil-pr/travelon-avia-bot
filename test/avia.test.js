@@ -8,6 +8,7 @@ import {
   pickSupplierOption,
   matchedExcludedHotel,
   buildHotelExcludeRe,
+  pickTransportAmount,
 } from '../src/travelon.js';
 import { config, ALREADY_SENT_PATTERNS } from '../src/config.js';
 import { tallySentByDay, topSentDays } from '../src/report.js';
@@ -231,4 +232,43 @@ test('ON TRIP must NOT match "ON TRIPLE ROOM" (word boundary)', () => {
   assert.equal(buildHotelExcludeRe('ON TRIP').test('ON TRIP HOTEL'), true);
   // Not tripped by an unrelated word containing the letters.
   assert.equal(buildHotelExcludeRe('ON TRIP').test('MONTRIP'), false);
+});
+
+// Real "Prices by modules" of booking 69811 (UK UI). Travelon showed
+// "Сума брутто" 2711.74 = sum of agency_cost; the old code inserted the
+// transport NET (transport[net_cost] = 889.84) — the bug ops reported.
+const MODS_69811 = [
+  { label: 'Готелі', gross_cost: '1588.86', operator_cost: '1671.35', agency_cost: '1671.35', client_cost: '1857.06' },
+  { label: 'Страховка', gross_cost: '11.2', operator_cost: '11.78', agency_cost: '11.78', client_cost: '13.09' },
+  { label: 'Трансфер', gross_cost: '88.0', operator_cost: '92.57', agency_cost: '92.57', client_cost: '102.85' },
+  { label: 'Транспорт', gross_cost: '890.37', operator_cost: '936.04', agency_cost: '936.04', client_cost: '1040.04' },
+];
+
+test('Pegasus penalty = transport BRUTTO (agency_cost), not netto', () => {
+  assert.equal(config.message.pegasus.amountField, 'agency_cost');
+  assert.equal(pickTransportAmount(MODS_69811), '936.04');
+  assert.equal(pickTransportAmount(MODS_69811, 'gross_cost'), '890.37'); // net column
+  assert.equal(pickTransportAmount(MODS_69811, 'client_cost'), '1040.04');
+  // agency_cost across modules == Travelon's "Сума брутто" for 69811.
+  const brutto = MODS_69811.reduce((acc, m) => acc + Number(m.agency_cost), 0);
+  assert.equal(brutto.toFixed(2), '2711.74');
+  // End to end: the message gets 936,04 (decimal comma), never the net 889,84.
+  const msg = applyTransportNet(PEGASUS_SAMPLE, pickTransportAmount(MODS_69811)).message;
+  assert.ok(msg.includes('розмірі 936,04 євро'));
+  assert.ok(!msg.includes('889,84'));
+});
+
+test('pickTransportAmount: EN labels, Transfer never confused, missing/zero -> empty', () => {
+  assert.equal(
+    pickTransportAmount([
+      { label: 'Transfer', agency_cost: '92.57' },
+      { label: 'Transport', agency_cost: '387.0' },
+    ]),
+    '387.0'
+  );
+  assert.equal(pickTransportAmount([{ label: 'Трансфер', agency_cost: '92.57' }]), '');
+  assert.equal(pickTransportAmount([{ label: 'Транспорт', agency_cost: '0' }]), '');
+  assert.equal(pickTransportAmount([{ label: 'Транспорт', agency_cost: '' }]), '');
+  assert.equal(pickTransportAmount([]), '');
+  assert.equal(pickTransportAmount(undefined), '');
 });

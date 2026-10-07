@@ -153,19 +153,29 @@ export async function runCycle() {
         }
 
         // Pick the message profile by supplier: JETIT (+ UAH) -> pegasus
-        // (subject 84 + Transport Net amount); everyone else -> regular.
+        // (subject 84 + transport BRUTTO amount); everyone else -> regular.
         const isPegasus = config.pegasusSuppliers.some(
           (n) => n.toLowerCase() === c.supplier.toLowerCase()
         );
         const prof = isPegasus ? config.message.pegasus : config.message.regular;
 
-        // Pegasus needs the booking's Transport Net amount (read from the edit page).
+        // Pegasus: the penalty is the transport BRUTTO — the Agency column of the
+        // Транспорт row in "Prices by modules" (what "Сума брутто" sums up), NOT
+        // the net cost. If it can't be read we do NOT send: a blank or wrong
+        // penalty is worse than retrying on the next cycle.
         let transportNet = '';
         if (prof.fillTransportNet) {
           await client.openEdit(c.id);
-          transportNet = await client.readTransportNet();
-          if (transportNet) log.info(`${c.id}: Transport Net = ${transportNet} (Pegasus).`);
-          else log.warn(`${c.id}: Transport Net not found (Pegasus) — sending without amount.`);
+          transportNet = await client.readTransportAmount(prof.amountField);
+          if (!transportNet) {
+            summary.errors.push(`${c.id}: transport brutto not found`);
+            rowsForReport.push(
+              mkRow(c, { sent: 'ні', result: 'Брутто транспорту не знайдено — НЕ надіслано' })
+            );
+            log.warn(`${c.id}: transport ${prof.amountField} not found (Pegasus) — NOT sent, will retry.`);
+            continue;
+          }
+          log.info(`${c.id}: Transport brutto (${prof.amountField}) = ${transportNet} (Pegasus).`);
         }
 
         await client.openChat(c.id);
@@ -238,7 +248,7 @@ export async function runCycle() {
             mkRow(c, {
               sent: 'так',
               result: isPegasus ? 'Надіслано (Pegasus)' : 'Надіслано',
-              note: isPegasus && transportNet ? `Transport Net: ${transportNet}` : '',
+              note: isPegasus && transportNet ? `Брутто транспорт: ${transportNet}` : '',
             })
           );
           log.info(`Sent to ${c.id} (${c.supplier})${isPegasus ? ' [Pegasus]' : ''}.`);
