@@ -20,6 +20,14 @@ export function todayISOInTz(tz) {
   }).format(new Date()); // en-CA -> YYYY-MM-DD
 }
 
+// "2026-10-01" -> "2026-09-30" (the calendar day before; pure date maths, no
+// time zone involved). For testing.
+export function prevDayISO(iso) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 // "17.06.2026 15:20:23" or "17.06.2026" -> "2026-06-17"
 export function ddmmyyyyToISO(d) {
   const m = d && d.match(/(\d{2})\.(\d{2})\.(\d{4})/);
@@ -185,6 +193,54 @@ export function applyTransportNet(text, transportNet) {
   return { message: out, replaced: out !== message };
 }
 
+// Option text normalised for comparison: case, spacing and the slash style
+// ("ТІКЕТСИ\ДРСТ" vs "ТІКЕТСИ/ДРСТ") do not matter.
+function normLabel(s) {
+  return String(s || '')
+    .replace(/[\\/]+/g, '/')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+// Pick the <option> for `label` from [{ v, t }]: the exact text first, then the
+// normalised text, then the loose regex `re`, then a normalised substring.
+// Placeholder options without a value are never picked. -> option or null.
+// For testing.
+export function pickOption(opts, label, re) {
+  const list = (opts || []).filter((o) => o && String(o.v ?? '') !== '');
+  const want = String(label || '').replace(/\s+/g, ' ').trim();
+  const n = normLabel(want);
+  return (
+    (want && list.find((o) => o.t === want)) ||
+    (n && list.find((o) => normLabel(o.t) === n)) ||
+    (re && list.find((o) => re.test(o.t))) ||
+    (n && list.find((o) => normLabel(o.t).includes(n))) ||
+    null
+  );
+}
+
+// True when `text` holds booking `id` as a whole number ("Заявка 72585",
+// "Request 72585", "№72585" — never 172585 or 725851). For testing.
+export function textHasId(text, id) {
+  const s = String(id ?? '').trim();
+  if (!/^\d+$/.test(s)) return false;
+  return new RegExp(`(^|\\D)${s}(?!\\d)`).test(String(text || ''));
+}
+
+// True when one of the chat-feed messages (HTML: "<br>", tags, &nbsp;) is the
+// AVIA regular-flight message — the same ALREADY_SENT_PATTERNS as the drawer
+// scan. For testing.
+export function feedHasAviaMessage(messages) {
+  return (messages || []).some((m) => {
+    const t = String(m ?? '')
+      .replace(/<br\s*\/?>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ');
+    return ALREADY_SENT_PATTERNS.some((re) => re.test(t));
+  });
+}
+
 export class AviaClient {
   constructor() {
     this.browser = null;
@@ -278,29 +334,33 @@ export class AviaClient {
     }
   }
 
-  // Select an <option> by exact label, then loosely by regex, then by substring.
-  async selectOptionLoose(loc, exactLabel, re) {
-    try {
-      await loc.selectOption({ label: exactLabel });
-      return true;
-    } catch {
-      /* fall through to loose matching */
+  // Select an <option>: read the options, pick one (pickOption: exact label,
+  // normalised, regex, substring) and select it BY VALUE. Never
+  // selectOption({ label }) — for a label that is not there it waits the whole
+  // default timeout (45 s) before failing, which is what the live subject label
+  // did on every send. The options are polled briefly because the subject list
+  // renders only after the department is chosen.
+  async selectOptionLoose(loc, exactLabel, re, { timeout = 6000 } = {}) {
+    const deadline = Date.now() + timeout;
+    let hit = null;
+    for (;;) {
+      const opts =
+        (await loc
+          .locator('option')
+          .evaluateAll((os) =>
+            os.map((o) => ({ v: o.value, t: (o.textContent || '').replace(/\s+/g, ' ').trim() }))
+          )
+          .catch(() => [])) || [];
+      hit = pickOption(opts, exactLabel, re);
+      if (hit || Date.now() >= deadline) break;
+      await this.page.waitForTimeout(200);
     }
-    const opts = await loc
-      .locator('option')
-      .evaluateAll((os) =>
-        os.map((o) => ({ v: o.value, t: (o.textContent || '').replace(/\s+/g, ' ').trim() }))
-      )
-      .catch(() => []);
-    const hit =
-      opts.find((o) => o.t === exactLabel) ||
-      (re ? opts.find((o) => re.test(o.t)) : null) ||
-      (exactLabel ? opts.find((o) => o.t.includes(exactLabel)) : null);
-    if (hit) {
-      await loc.selectOption(hit.v).catch(() => {});
-      return true;
+    if (!hit) return false;
+    if (hit.t !== String(exactLabel || '').trim()) {
+      log.info(`Option "${exactLabel}" not found as-is — selecting "${hit.t}".`);
     }
-    return false;
+    await loc.selectOption({ value: hit.v }, { timeout: 5000 }).catch(() => {});
+    return true;
   }
 
   // --- login (copied from the working transfer bot) -------------------------
@@ -576,13 +636,54 @@ export class AviaClient {
       }
     }
 
-    await this.page
-      .getByText(new RegExp(`request\\s*${id}`, 'i'))
-      .first()
-      .waitFor({ timeout: 8000 })
-      .catch(() => {});
+    // Wait for the drawer to show THIS booking's id, then for the composer.
+    // The bare id is matched inside the drawer: the old English caption match
+    // (/request\s*<id>/) stopped matching when the UI went Ukrainian
+    // (27.08.2026). Returns whether the id was seen — another booking's drawer
+    // must never be read as this one's history.
+    const deadline = Date.now() + 8000;
+    let shown = await this.chatShowsId(id);
+    while (!shown && Date.now() < deadline) {
+      await this.page.waitForTimeout(250);
+      shown = await this.chatShowsId(id);
+    }
     await this.firstExisting(sel.chat.textArea, { timeout: 4000 });
     await this.page.waitForTimeout(500);
+    return shown;
+  }
+
+  // True when the chat drawer is visible and mentions booking `id`.
+  async chatShowsId(id) {
+    const panel = await this.firstExisting(sel.chat.panel, { timeout: 300 });
+    if (!panel || !(await panel.isVisible().catch(() => false))) return false;
+    return textHasId(await panel.innerText().catch(() => ''), id);
+  }
+
+  // THIS booking's chat history straight from the server: the JSON feed the
+  // chat drawer itself loads (GET /book/bundle_notifies/chat-detail/<id> ->
+  // { notifies: [{ message, ... }] }; read the same way by the accounting and
+  // manager bots). Complete as soon as it arrives and tied to the id, so the
+  // "already sent?" decision does not depend on how far the drawer rendered.
+  // -> { ok, status, messages }; ok=false when it could not be read.
+  async readChatFeed(id) {
+    return await this.page
+      .evaluate(async (bundleId) => {
+        try {
+          const r = await fetch(`/book/bundle_notifies/chat-detail/${bundleId}`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json' },
+            credentials: 'include',
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!r.ok) return { ok: false, status: r.status, messages: [] };
+          const j = await r.json();
+          const arr = Array.isArray(j) ? j : j && Array.isArray(j.notifies) ? j.notifies : null;
+          if (!arr) return { ok: false, status: r.status, error: 'no notifies[]', messages: [] };
+          return { ok: true, status: r.status, messages: arr.map((x) => String((x && x.message) || '')) };
+        } catch (e) {
+          return { ok: false, status: 0, error: String(e), messages: [] };
+        }
+      }, Number(id))
+      .catch((e) => ({ ok: false, status: 0, error: String(e), messages: [] }));
   }
 
   async closeChat() {

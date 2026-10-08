@@ -83,6 +83,33 @@ export function keepExistingRow(row, existingSentCell) {
   return Boolean(row && row.keep) && String(existingSentCell ?? '').trim().toLowerCase() === 'так';
 }
 
+// Номери заявок, позначених у журналі «Відправлено = так» (стовпець E):
+// повідомлення в їхньому чаті вже є (надіслано / надіслано раніше / вже в
+// чаті). `rows` — масиви значень A:E (шапка не заважає). Для тестів.
+export function sentIdsFromRows(rows) {
+  const ids = new Set();
+  for (const r of rows || []) {
+    const id = (r && r[0] != null ? r[0] : '').toString().trim();
+    const sent = (r && r[4] != null ? r[4] : '').toString().trim().toLowerCase();
+    if (id && sent === 'так') ids.add(id);
+  }
+  return ids;
+}
+
+// Відновлення «вже надіслано» з журналу: sent.json живе в контейнері без тому
+// й зникає на кожному рестарті/деплої, а таблиця — ні. Читає A:E вкладки.
+// КИДАЄ виняток, якщо таблицю прочитати не вдалося — runCycle тоді лише пише
+// попередження й покладається на перевірку чату.
+export async function readSentIds() {
+  const sheets = await getSheets();
+  const { title: tab } = await hbTabMeta(sheets);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: config.report.spreadsheetId,
+    range: `${tab}!A1:E100000`,
+  });
+  return sentIdsFromRows(res.data.values || []);
+}
+
 // Upsert рядків по № заявки (стовпець A). Повертає { updated, appended, kept }.
 export async function upsertRows(rows) {
   if (!rows || !rows.length) return { updated: 0, appended: 0, kept: 0 };
@@ -251,7 +278,7 @@ export async function writeHeartbeat(info = {}) {
       { values: [L('Оновлено'), S(`${ts} (${config.tz})`)] },
       { values: [L('Режим'), S(info.mode || '')] },
       { values: [L('Останній цикл'), S(info.took != null ? `${info.took} c` : '')] },
-      { values: [L('Знайдено сьогодні'), S(info.matched ?? 0)] },
+      { values: [L('Знайдено (сьогодні+вчора)'), S(info.matched ?? 0)] },
       { values: [L(sentLabel), S(info.sent ?? 0)] },
       { values: [L('Помилки'), S(errs.length ? errs.join(' | ') : '—')] },
     ];

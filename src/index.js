@@ -1,10 +1,13 @@
-// Entry point: validate config, run once at startup, then schedule every N min.
+// Entry point: validate config, then run on the cron schedule (and once at boot
+// only when RUN_ON_STARTUP=true; RUN_ONCE=true runs a single cycle and exits).
 import cron from 'node-cron';
 import { config, validateConfig } from './config.js';
 import { log } from './logger.js';
 import { runCycle } from './runCycle.js';
+import { requestStop } from './stop.js';
 
 let running = false;
+let stopping = false;
 let consecutiveBrowserFails = 0;
 const START_AT = Date.now();
 
@@ -16,6 +19,10 @@ const BROWSER_FAIL_RE =
   /browserType\.launch|browserContext\.newPage|Target (page|context|browser)|pthread_create|Resource temporarily unavailable|Failed to launch|has been closed|Cannot allocate memory/i;
 
 async function safeRun(trigger) {
+  if (stopping) {
+    log.info(`Shutting down — ignoring the ${trigger} tick.`);
+    return;
+  }
   if (running) {
     log.warn(`Cycle still running — skipping this ${trigger} tick.`);
     return;
@@ -60,6 +67,10 @@ async function safeRun(trigger) {
   } finally {
     clearTimeout(watchdog);
     running = false;
+    if (stopping) {
+      log.info('Cycle wound down after the stop request — exiting.');
+      process.exit(0);
+    }
   }
 
   // Preemptive periodic restart: before a multi-day container leaks enough to
@@ -82,6 +93,7 @@ async function main() {
   log.info(' TravelON AVIA message bot');
   log.info(` mode      : ${config.dryRun ? 'DRY-RUN (no messages sent)' : 'LIVE (will send)'}`);
   log.info(` schedule  : "${config.checkCron}"  tz=${config.tz}`);
+  log.info(` startup   : ${config.runOnce || config.runOnStartup ? 'run a cycle now' : 'wait for the schedule'}`);
   log.info(` suppliers : ${config.supplierNames.join(', ')}`);
   log.info(
     ` statuses  : ${
@@ -91,18 +103,23 @@ async function main() {
     }`
   );
   log.info(` watchdog  : cycle ${config.cycleTimeoutMs}ms | supplier ${config.supplierScanTimeoutMs}ms`);
-  log.info(` bookingDt : ${config.bookingDateMode}`);
+  log.info(
+    ` bookingDt : ${config.bookingDateMode} (${
+      config.bookingDateMode === 'today_or_later' ? 'yesterday and later' : 'today + yesterday'
+    })`
+  );
+  log.info(` chat feed : ${config.chatFeed ? 'ON' : 'off (drawer only)'}`);
   log.info(` dept(r)   : ${config.message.regular.department}`);
   log.info(` subject(r): ${config.message.regular.subject}`);
   log.info(` dept(p)   : ${config.message.pegasus.department}`);
   log.info(` subject(p): ${config.message.pegasus.subject}`);
   log.info(` pegasus   : ${config.pegasusSuppliers.join(', ')}`);
   log.info(` report    : ${config.report.enabled ? 'ON' : 'off'} (tab "${config.report.sheetName}")`);
+  log.info(` shutdown  : graceful, finish current request (max ${Math.round(config.stopGraceMs / 1000)}s)`);
   log.info('============================================================');
 
-  await safeRun('startup');
-
   if (config.runOnce) {
+    await safeRun('startup');
     log.info('RUN_ONCE=true — exiting after a single cycle.');
     process.exit(0);
   }
@@ -114,16 +131,40 @@ async function main() {
 
   cron.schedule(config.checkCron, () => safeRun('scheduled'), { timezone: config.tz });
   log.info('Scheduler armed; running 24/7. Waiting for next tick…');
+
+  // Optional boot cycle (off by default: a deploy/restart must not start an
+  // extra cycle off-schedule — the next tick picks everything up).
+  if (config.runOnStartup) await safeRun('startup');
 }
 
-process.on('SIGTERM', () => {
-  log.info('SIGTERM received — shutting down.');
-  process.exit(0);
-});
-process.on('SIGINT', () => {
-  log.info('SIGINT received — shutting down.');
-  process.exit(0);
-});
+// Graceful stop (Railway sends SIGTERM on every deploy/restart): when idle, exit
+// at once; mid-cycle, let the request in progress finish (its chat message and
+// state write), skip the rest, then exit. A second signal or the grace timeout
+// exits immediately.
+function onSignal(sig) {
+  if (stopping) {
+    log.warn(`${sig} received again — exiting now.`);
+    process.exit(0);
+  }
+  stopping = true;
+  if (!running) {
+    log.info(`${sig} received — idle, shutting down.`);
+    process.exit(0);
+  }
+  log.warn(
+    `${sig} received mid-cycle — finishing the current request, then exiting (max ${Math.round(
+      config.stopGraceMs / 1000
+    )}s).`
+  );
+  requestStop(sig);
+  setTimeout(() => {
+    log.warn('Graceful stop timed out — exiting.');
+    process.exit(0);
+  }, config.stopGraceMs).unref();
+}
+
+process.on('SIGTERM', () => onSignal('SIGTERM'));
+process.on('SIGINT', () => onSignal('SIGINT'));
 process.on('unhandledRejection', (reason) => {
   log.error('Unhandled promise rejection:', reason);
 });

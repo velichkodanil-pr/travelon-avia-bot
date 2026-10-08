@@ -376,14 +376,16 @@ test('filterApplied: the re-rendered form must show exactly our partner + status
   assert.equal(filterApplied({ stale: true, partner: '1254', statuses: ids }, '1254', ids), false);
 });
 
-test('needNextPage: only while the page still ENDS with today (date-desc list)', () => {
+test('needNextPage: only while the page still ENDS with today/yesterday (date-desc list)', () => {
   const today = '2026-10-07';
   const r = (d) => ({ text: '72585 x', status: 'В роботі', bookingDate: d });
   const totals = { text: '116 60026.33 13023.89', status: null, bookingDate: '' }; // per-page totals row
   // whole page is today -> the next page may hold more of today
   assert.equal(needNextPage([r('07.10.2026 12:00:00'), r('07.10.2026 09:00:00'), totals], today), true);
-  // page already reaches yesterday -> nothing of today on the next page
-  assert.equal(needNextPage([r('07.10.2026 12:00:00'), r('06.10.2026 23:59:00'), totals], today), false);
+  // page ends with yesterday -> the next page may hold more of yesterday
+  assert.equal(needNextPage([r('07.10.2026 12:00:00'), r('06.10.2026 23:59:00'), totals], today), true);
+  // page already reaches the day before yesterday -> nothing of the window next
+  assert.equal(needNextPage([r('06.10.2026 12:00:00'), r('05.10.2026 23:59:00'), totals], today), false);
   assert.equal(needNextPage([r('05.10.2026 10:00:00')], today), false);
   assert.equal(needNextPage([totals], today), false);
   assert.equal(needNextPage([], today), false);

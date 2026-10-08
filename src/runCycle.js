@@ -1,20 +1,28 @@
-// One full AVIA pass: login -> per supplier filter+scan today's requests ->
-// per request: dedup -> open chat -> choose Авіа + subject -> verify auto-fill
-// -> send (unless dry-run) -> report.
+// One full AVIA pass: login -> per supplier filter+scan today's and yesterday's
+// requests -> per request: dedup -> open chat -> choose Авіа + subject -> verify
+// auto-fill -> send (unless dry-run) -> report.
 import {
   AviaClient,
   todayISOInTz,
+  prevDayISO,
   ddmmyyyyToISO,
   matchedExcludedHotel,
   isCancelledStatus,
+  feedHasAviaMessage,
 } from './travelon.js';
 import { config } from './config.js';
 import { log } from './logger.js';
 import { wasSent, markSent } from './store.js';
+import { stopRequested, stopReason } from './stop.js';
 import { notify, notifyEnabled } from './notify.js';
-import { reportEnabled, upsertRows, writeHeartbeat } from './report.js';
+import { reportEnabled, upsertRows, writeHeartbeat, readSentIds } from './report.js';
 
 const DASH = '—';
+const RECHECK_MS = 1500;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Already-sent request ids from the Sheet journal; null = journal off.
+const sheetSentIds = () => (reportEnabled() ? readSentIds() : null);
 
 // Reject if `p` doesn't settle within `ms`, so one hung Playwright call can't
 // freeze a whole cycle. The underlying op is abandoned (not truly cancelled);
@@ -27,25 +35,29 @@ function withTimeout(p, ms, label) {
   return Promise.race([p, guard]).finally(() => clearTimeout(t));
 }
 
+// In scope = booking (request) date TODAY or YESTERDAY: a booking made after
+// the last cycle of the day (~23:45-24:00), or while the bot was down around
+// midnight, is still picked up the next day. The dedup (Sheet journal +
+// sent.json + chat) keeps the wider window from messaging anyone twice.
 function matchesBookingDate(iso, today) {
-  if (!iso) return false;
-  return config.bookingDateMode === 'today_or_later' ? iso >= today : iso === today;
+  if (!iso || iso < prevDayISO(today)) return false;
+  return config.bookingDateMode === 'today_or_later' || iso <= today;
 }
 
 // Keep a row only if: it has a 5-digit id, it is NOT cancelled, its status is
-// one of the targets, and its booking (request) date matches today. Skips are
-// logged only for TODAY's rows (older rows on the page are just noise).
+// one of the targets, and its booking (request) date is today or yesterday.
+// Skips are logged only for rows in that window (older rows are just noise).
 export function parseRow(row, supplierName, today) {
   const flat = row.text || '';
   const idM = flat.match(/\b(\d{5})\b/);
   if (!idM) return null;
   const iso = ddmmyyyyToISO(row.bookingDate);
-  const isToday = matchesBookingDate(iso, today);
+  const inWindow = matchesBookingDate(iso, today);
   // Hard exclusion by hotel name (e.g. Work&Travelon / ON TRIP) — these must
   // never receive the regular-flight message.
   const badHotel = matchedExcludedHotel(flat, config.hotelExcludes);
   if (badHotel) {
-    if (isToday) log.info(`Skip ${idM[1]}: hotel excluded ("${badHotel}").`);
+    if (inWindow) log.info(`Skip ${idM[1]}: hotel excluded ("${badHotel}").`);
     return null;
   }
   const status = (row.status || '').trim();
@@ -53,7 +65,7 @@ export function parseRow(row, supplierName, today) {
   // Never message a cancelled booking (Анульовано / Canceled / ...). The list is
   // already requested WITHOUT cancelled status ids; this is the second guard.
   if (isCancelledStatus(status, config.excludeStatuses)) {
-    if (isToday) log.info(`Skip ${idM[1]}: cancelled ("${status}").`);
+    if (inWindow) log.info(`Skip ${idM[1]}: cancelled ("${status}").`);
     return null;
   }
   // Empty allow-list = accept every (non-excluded) status.
@@ -61,14 +73,14 @@ export function parseRow(row, supplierName, today) {
     config.targetStatuses.length === 0 ||
     config.targetStatuses.some((s) => s.toLowerCase() === sl);
   if (!okStatus) return null;
-  if (!isToday) return null;
+  if (!inWindow) return null;
   return { id: idM[1], supplier: supplierName, status, bookingDateISO: iso };
 }
 
 // The list is sorted newest-first (verified live: ids AND request dates descend
-// across pages). The next page can hold today's bookings only if THIS page's
-// last dated row is still today; rows without a date (the per-page totals row)
-// are ignored. For testing.
+// across pages). The next page can hold bookings of the window only if THIS
+// page's last dated row is still today or yesterday; rows without a date (the
+// per-page totals row) are ignored. For testing.
 export function needNextPage(rows, today) {
   let last = null;
   for (const r of rows || []) {
@@ -89,7 +101,9 @@ const mkRow = (c, o = {}) => ({
   ...o,
 });
 
-export async function runCycle() {
+// deps are injectable for tests (fake browser client / journal); production
+// uses the defaults.
+export async function runCycle({ makeClient = () => new AviaClient(), loadSentIds = sheetSentIds } = {}) {
   const startedAt = new Date();
   const summary = {
     dryRun: config.dryRun,
@@ -103,7 +117,7 @@ export async function runCycle() {
   };
   const rowsForReport = [];
   const candidates = [];
-  const client = new AviaClient();
+  const client = makeClient();
 
   try {
     await client.init();
@@ -132,12 +146,18 @@ export async function runCycle() {
     const statusIds = st.ids;
     log.info('Suppliers: ' + suppliers.map((s) => `${s.name}=${s.id ?? 'NOT FOUND'}`).join(', '));
     log.info(
-      `Status IDs: ${statusIds.join(',')} (excluded: ${st.dropped.join(', ') || DASH}) | today=${today} (${config.bookingDateMode})`
+      `Status IDs: ${statusIds.join(',')} (excluded: ${st.dropped.join(', ') || DASH}) | ` +
+        `booking date ${prevDayISO(today)}..${today} (${config.bookingDateMode})`
     );
 
-    // Scan each supplier's list, keeping today's matching requests (dedup by id).
+    // Scan each supplier's list, keeping today's and yesterday's matching
+    // requests (dedup by id).
     const seen = new Set();
     for (const sup of suppliers) {
+      if (stopRequested()) {
+        log.warn('Stop requested — supplier scan cut short; the next cycle picks everything up.');
+        break;
+      }
       if (!sup.id) {
         summary.errors.push(`supplier "${sup.name}" not found in dropdown`);
         log.warn(`Supplier "${sup.name}" not found in the partner dropdown — skipping.`);
@@ -166,10 +186,10 @@ export async function runCycle() {
                 }
               }
               // List is date-desc: open the next page only while this one still
-              // ends with today's bookings (each page is ~2 MB to load).
+              // ends with today's/yesterday's bookings (each page is ~2 MB).
               if (!needNextPage(rows, today)) break;
             }
-            log.info(`${sup.name}: ${supCount} request(s) today`);
+            log.info(`${sup.name}: ${supCount} request(s) today/yesterday`);
           })(),
           config.supplierScanTimeoutMs,
           `scan ${sup.name}`
@@ -182,11 +202,40 @@ export async function runCycle() {
     summary.matched = candidates.map((c) => `${c.id}/${c.supplier}`);
     log.info(`Matched ${candidates.length}: ${summary.matched.join(', ') || DASH}`);
 
+    // Requests already marked "Відправлено = так" in the Sheet journal: sent.json
+    // lives in the container and is wiped by every restart/deploy, the journal
+    // is not. Unreadable journal -> warn and rely on the in-chat check alone.
+    let sheetSent = new Set();
+    if (candidates.length && !stopRequested()) {
+      try {
+        const ids = await withTimeout(Promise.resolve(loadSentIds()), 30000, 'Sheet journal read');
+        if (ids) {
+          sheetSent = new Set(ids);
+          log.info(`Sheet journal: ${sheetSent.size} request(s) marked sent.`);
+        }
+      } catch (e) {
+        log.warn(`Sheet journal unreadable — relying on the in-chat check only: ${e.message}`);
+      }
+    }
+
     // Process each candidate.
     let sends = 0;
-    for (const c of candidates) {
+    for (const [idx, c] of candidates.entries()) {
+      // Graceful stop (SIGTERM on deploy): the request in progress was
+      // finished; the rest is left for the next cycle.
+      if (stopRequested()) {
+        log.warn(`Stop requested — ${candidates.length - idx} request(s) left for the next cycle.`);
+        break;
+      }
+      // Never decide "not sent yet" blind: skip until the next cycle. keep: a
+      // journal row that already says "так" is not overwritten.
+      const retryLater = (why, result) => {
+        summary.errors.push(`${c.id}: ${why} — retry next cycle`);
+        rowsForReport.push(mkRow(c, { sent: 'ні', result, keep: true }));
+        log.warn(`Skip ${c.id}: ${why} — retry next cycle (no blind send).`);
+      };
       try {
-        if (await wasSent(c.id)) {
+        if (sheetSent.has(c.id) || (await wasSent(c.id))) {
           summary.skippedStore.push(c.id);
           // keep: an existing "так" row is left untouched (original result,
           // send time and brutto note survive); only missing rows are added.
@@ -221,9 +270,38 @@ export async function runCycle() {
           log.info(`${c.id}: Transport brutto (${prof.amountField}) = ${transportNet} (Pegasus).`);
         }
 
-        await client.openChat(c.id);
+        const shown = await client.openChat(c.id);
 
-        if (await client.chatAlreadySent()) {
+        // No chat drawer -> no composer and no history to look at.
+        if (!(await client.chatPanelVisible())) {
+          retryLater('chat did not open', 'Чат не відкрився — повтор');
+          await client.closeChat().catch(() => {});
+          continue;
+        }
+
+        // "Not sent yet" needs THIS booking's whole history: the server chat
+        // feed for this id; else the drawer, only once it shows this id, looked
+        // at twice (its history loads asynchronously).
+        const feed = config.chatFeed ? await client.readChatFeed(c.id) : { ok: false };
+        if (config.chatFeed && !feed.ok) {
+          log.warn(
+            `${c.id}: chat feed unreadable (status ${feed.status ?? '?'}${feed.error ? `, ${feed.error}` : ''}) — using the drawer.`
+          );
+        }
+        if (!feed.ok && !shown) {
+          retryLater('chat history not confirmed', 'Історію чату не підтверджено — повтор');
+          await client.closeChat().catch(() => {});
+          continue;
+        }
+        if (!shown) log.info(`${c.id}: chat drawer does not show the request id — the chat feed decides.`);
+        const lookTwice = async () => {
+          if (await client.chatAlreadySent()) return true;
+          await sleep(RECHECK_MS);
+          return client.chatAlreadySent();
+        };
+        const inChat = feed.ok ? feedHasAviaMessage(feed.messages) : await lookTwice();
+
+        if (inChat) {
           summary.skippedAlready.push(c.id);
           if (!config.dryRun) await markSent(c.id, { supplier: c.supplier, reason: 'already-in-chat' });
           rowsForReport.push(mkRow(c, { sent: 'так', result: 'Вже надіслано у чаті', keep: true }));
@@ -329,6 +407,10 @@ export async function runCycle() {
     `Skipped (sent before): ${summary.skippedStore.join(', ') || DASH}`,
     `Errors: ${summary.errors.join(' | ') || DASH}`,
   ];
+  // Interrupted by a graceful stop: the rows of the requests handled so far
+  // are still written to the Sheet below (the journal is the dedup state).
+  const interrupted = stopRequested() ? stopReason() : '';
+  if (interrupted) lines.push(`Interrupted: ${interrupted} — the rest is picked up by the next cycle`);
   let report = lines.join('\n');
   log.info('Cycle summary:\n' + report);
   if (notifyEnabled()) await notify(report);
@@ -355,5 +437,5 @@ export async function runCycle() {
     });
   }
 
-  return summary;
+  return { ...summary, interrupted };
 }

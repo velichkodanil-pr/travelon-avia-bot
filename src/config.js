@@ -33,10 +33,18 @@ export const config = {
   // Every 5 minutes by default (per spec). Uses CRON_TZ below.
   checkCron: process.env.CHECK_CRON || '*/5 * * * *',
   runOnce: bool(process.env.RUN_ONCE, false),
+  // A (re)start does NOT run a cycle by default: the next cron tick does, so a
+  // deploy or crash-restart never starts an extra cycle off-schedule.
+  // RUN_ON_STARTUP=true restores the old behaviour.
+  runOnStartup: bool(process.env.RUN_ON_STARTUP, false),
+  // Graceful stop: on SIGTERM the request in progress is finished, the rest
+  // waits for the next cycle; after this many seconds we exit regardless. Keep
+  // it below the Railway draining time (RAILWAY_DEPLOYMENT_DRAINING_SECONDS).
+  stopGraceMs: num(process.env.STOP_GRACE_SEC, 100) * 1000,
   tz: process.env.CRON_TZ || 'Europe/Kyiv',
   maxSendsPerRun: num(process.env.MAX_SENDS_PER_RUN, 25),
-  // How many list pages to page through per supplier when scanning (today's
-  // requests are at the top, so a few pages is plenty).
+  // How many list pages to page through per supplier when scanning (today's and
+  // yesterday's requests are at the top, so a few pages is plenty).
   maxListPages: num(process.env.AVIA_MAX_LIST_PAGES, 5),
 
   // --- matching: suppliers -------------------------------------------------
@@ -87,9 +95,16 @@ export const config = {
   maxUptimeMs: num(process.env.MAX_UPTIME_MS, 18 * 60 * 60 * 1000),
 
   // --- matching: booking date ----------------------------------------------
-  // 'today'          -> only requests whose booking (request) date is today.
-  // 'today_or_later' -> today and later (rarely needed).
+  // 'today'          -> requests whose booking (request) date is today OR
+  //                     yesterday (a late-evening booking made after the last
+  //                     cycle of the day is still picked up the next day).
+  // 'today_or_later' -> yesterday and later (rarely needed).
   bookingDateMode: (process.env.AVIA_BOOKING_DATE || 'today').toLowerCase(),
+
+  // Before deciding "not sent yet", read THIS booking's chat history from the
+  // server feed (GET /book/bundle_notifies/chat-detail/<id>, the JSON the chat
+  // drawer itself loads). false = decide on the chat drawer only.
+  chatFeed: bool(process.env.AVIA_CHAT_FEED, true),
 
   // --- the messages --------------------------------------------------------
   // Department is shared. Each supplier uses one of two message PROFILES:
